@@ -1,0 +1,12 @@
+# Port-owned content mod for Actually Additions slice 1: the Coal Generator and
+# the Crusher. Assets and data are carried from the ATM10 jar
+# (actuallyadditions-1.3.26+mc1.21.1.jar, MIT), with the patches documented in
+# README.md. Licence: MIT (Ellpeck/ActuallyAdditions).
+id = "actuallyadditions"
+name = "Actually Additions"
+version = "1.3.26"
+description = "Coal Generator and Crusher (slice 1)"
+authors = ["Ellpeck"]
+api = "0.2"
+side = "both"
+capabilities = ["registries"]

@@ -1,0 +1,8 @@
+{
+  "title": "itemGroup.actuallyadditions.machines",
+  "icon": "actuallyadditions:coal_generator",
+  "items": [
+    "actuallyadditions:coal_generator",
+    "actuallyadditions:crusher"
+  ]
+}
