@@ -11,18 +11,18 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mod_api::{
-    self, BlockClick, BlockEntityEvent, BlockEntityPart, BlockEntityTickEvent,
+    self, BlockClick, BlockDropsEvent, BlockEntityEvent, BlockEntityPart, BlockEntityTickEvent,
     BlockEntityTickReply, BlockEntityTicksEvent, BlockPart, Command, CommandArgumentValue,
     Compound, ENERGY, Flow, Host, HostTransaction, Identifier, Ingredient, InteractionResult,
-    ItemKey, ItemPlace, ItemResource, ItemStack, LevelRef, LevelSide, ModContainer,
-    ModEnergyBuffer, RandomSource, Registrar, RegistrationContext, RunModCommandEvent, ServerHost,
-    Tag, Text, move_energy,
+    ItemKey, ItemPart, ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LevelSide,
+    ModContainer, ModEnergyBuffer, OnBlockPlacedByEvent, RandomSource, Registrar,
+    RegistrationContext, RunModCommandEvent, ServerHost, Tag, Text, move_energy,
 };
 
 use crate::runtime::{
     CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, CrushResult, Crusher, CrushingRecipe,
     GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, Step, bonus_for, can_crush, clamp_energy,
-    comparator_strength, ingredient_json, is_fuel,
+    comparator_strength, ingredient_json, is_fuel, restored_crusher, restored_generator,
 };
 
 /// The generator block; its block entity type carries the same path.
@@ -56,19 +56,41 @@ const NO_MACHINE: &str = "No Actually Additions machine there.";
 /// Declare both machines: a block entity type each, its Part (tick and click), the container and
 /// the energy buffer (upstream's `RegisterCapabilitiesEvent`).
 pub(crate) fn declare(r: &mut dyn Registrar, context: &RegistrationContext) {
+    // The carried `data/actuallyadditions/recipe/crushing/*.json` declare this type; without
+    // a serializer the game refuses every one of them at load ("unregistered recipe
+    // serializer"), which is a hard startup error. The port reads the JSON itself (the
+    // crusher's own matcher), so the serializer only has to accept and keep the object.
+    r.register_recipe_type(CRUSHING);
+    r.register_raw_recipe_serializer(CRUSHING, CRUSHING);
+    // The type is declared first, then every per-block capability, then the Part: that is the
+    // order the pin's own registrar expects (the block's declaration is what a container or a
+    // buffer hangs off).
+    // The entity types carry their own ids (`…_block_entity`): a type whose id equals its
+    // block's id makes the host skip the block entity it should create, so the block has no
+    // block entity in the world's own map and every capability on it answers "no container".
+    let generator_kind = r
+        .block_entity_type("coal_generator_block_entity")
+        .blocks(&["coal_generator"])
+        .build();
+    let crusher_kind = r
+        .block_entity_type("crusher_block_entity")
+        .blocks(&["crusher"])
+        .build();
     let generator = r.block_key(GENERATOR);
     let crusher = r.block_key(CRUSHER);
     r.block_container(&generator, generator_container());
     r.block_container(&crusher, crusher_container());
     r.block_energy(&generator, generator_battery());
     r.block_energy(&crusher, crusher_battery());
-    let generator_kind = r
-        .block_entity_type("coal_generator")
-        .blocks(&["coal_generator"])
-        .build();
-    let crusher_kind = r.block_entity_type("crusher").blocks(&["crusher"]).build();
-    r.block_part(generator, GeneratorPart);
-    r.block_part(crusher, CrusherPart);
+    // A broken machine's item carries its saved state (`block_drops`) and clamps it back when
+    // placed again (this Part on the block item).
+    let generator_item = r.item_key(GENERATOR);
+    let crusher_item = r.item_key(CRUSHER);
+    r.item_part(generator_item, MachineItemPart);
+    r.item_part(crusher_item, MachineItemPart);
+    // `block_entity_part` attaches the Part to the type's blocks as well, so registering
+    // `GeneratorPart`/`CrusherPart` with `block_part` first would attach it twice and the game
+    // refuses a duplicate ("attached twice, by actuallyadditions and actuallyadditions").
     if let Err(error) = r.block_entity_part(&generator_kind, GeneratorPart) {
         context.refuse(&error.to_string());
     }
@@ -78,7 +100,7 @@ pub(crate) fn declare(r: &mut dyn Registrar, context: &RegistrationContext) {
 }
 
 /// The generator's container: one fuel slot every face reaches, insert-only for automation
-/// (`native_block_entity_container`'s `ModContainer` at the retired pin).
+/// (`native_block_entity_container`'s `ModContainer` at the retired pin); `use` opens its menu.
 pub(crate) fn generator_container() -> ModContainer {
     ModContainer {
         slots: GENERATOR_SLOTS,
@@ -90,7 +112,7 @@ pub(crate) fn generator_container() -> ModContainer {
 }
 
 /// The crusher's container: its input and its two outputs, every face reaching each, so a hopper
-/// can feed it and take from it.
+/// can feed it and take from it; `use` opens its menu.
 pub(crate) fn crusher_container() -> ModContainer {
     let all: Vec<usize> = (0..CRUSHER_SLOTS).collect();
     ModContainer {
@@ -181,9 +203,19 @@ pub(crate) fn write_crusher(saved: &mut Tag, state: &Crusher) {
 
 /// The generator's report line as `/actuallyadditions info` prints it, `t` being the world time
 /// (the in-game check uses it to prove a reply is fresh).
-pub(crate) fn generator_line(pos: [i32; 3], state: &Generator, t: i64) -> String {
+pub(crate) fn generator_line(
+    pos: [i32; 3],
+    state: &Generator,
+    fuel: Option<(&str, u32)>,
+    t: i64,
+) -> String {
+    let fuel = match fuel {
+        Some((item, count)) => format!("{item} x{count}"),
+        None => "empty".to_owned(),
+    };
     format!(
-        "Coal Generator at {},{},{}: {}/{} FE (comparator {}, burning {}/{} ticks, t={t})",
+        "Coal Generator at {},{},{}: {}/{} FE (comparator {}, burning {}/{} ticks, fuel {fuel}, \
+         t={t})",
         pos[0],
         pos[1],
         pos[2],
@@ -200,11 +232,11 @@ pub(crate) fn generator_line(pos: [i32; 3], state: &Generator, t: i64) -> String
 pub(crate) fn crusher_line(
     pos: [i32; 3],
     state: &Crusher,
-    input: Option<(&str, u32)>,
+    slots: [Option<(&str, u32)>; 3],
     recipe: Option<&CrushingRecipe>,
     t: i64,
 ) -> String {
-    let input = match input {
+    let slot = |entry: Option<(&str, u32)>| match entry {
         Some((item, count)) => format!("{item} x{count}"),
         None => "empty".to_owned(),
     };
@@ -226,8 +258,8 @@ pub(crate) fn crusher_line(
             )
         });
     format!(
-        "Crusher at {},{},{}: {}/{} FE (comparator {}, progress {}/{}, input {}, crushing into {}, \
-         bonus {}, t={t})",
+        "Crusher at {},{},{}: {}/{} FE (comparator {}, progress {}/{}, input {}, out0 {}, out1 {}, \
+         crushing into {}, bonus {}, t={t})",
         pos[0],
         pos[1],
         pos[2],
@@ -236,7 +268,9 @@ pub(crate) fn crusher_line(
         comparator_strength(state.energy, CRUSHER_CAPACITY),
         state.progress,
         CRUSHER_TICKS,
-        input,
+        slot(slots[0]),
+        slot(slots[1]),
+        slot(slots[2]),
         crushing,
         bonus,
     )
@@ -267,19 +301,25 @@ pub(crate) fn find_recipe(host: &dyn Host, input: &ItemStack) -> Option<Crushing
     if cache.is_none() || due {
         let mut resolved = Vec::new();
         for recipe in host.recipes_of_type(CRUSHING).iter() {
-            let Ok(parsed) = CrushingRecipe::parse(&recipe.id, &recipe.json.to_string()) else {
+            // The recipe's JSON is the SDK's own `serde_json`, which the launcher compiles
+            // separately from this package's crate: it is read through its text so the pure
+            // module parses this package's `serde_json::Value`, not a distinct type with the
+            // same name.
+            let text = recipe.json.to_string();
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
                 continue;
             };
-            let ingredient =
-                recipe
-                    .json
-                    .get("ingredient")
-                    .map(ingredient_json)
-                    .and_then(|ingredient| {
-                        host.recipe_ingredient(&ingredient.to_string())
-                            .ok()
-                            .flatten()
-                    });
+            let Ok(parsed) = CrushingRecipe::parse(&recipe.id, &text) else {
+                continue;
+            };
+            let ingredient = value
+                .get("ingredient")
+                .map(ingredient_json)
+                .and_then(|ingredient| {
+                    host.recipe_ingredient(&ingredient.to_string())
+                        .ok()
+                        .flatten()
+                });
             if let Some(ingredient) = ingredient {
                 resolved.push(Resolved {
                     ingredient,
@@ -614,35 +654,162 @@ fn insert_from_hand(
         let key = held.item();
         let limit = host.max_stack_size(key).unwrap_or(DEFAULT_STACK);
         let existing = entity.item_slot(&*host, INPUT_SLOT as u32).ok().flatten();
+        // The slot keeps the stack it already holds; an inserted stack is the caller's own
+        // stack (components and damage included), never rebuilt from an id and a count.
         let (inserted, after) = match existing {
             None => {
                 let count = held.count().min(limit);
-                (count, ItemStack::new(key, count))
+                let mut after = held.clone();
+                after.set_count(count).map_err(|_| ())?;
+                (count, after)
             }
-            Some(existing) if existing.item() == key => {
+            Some(existing) if existing.is_stackable_with(held) => {
                 let room = limit.saturating_sub(existing.count());
                 let count = held.count().min(room);
                 let mut after = existing;
-                let merged = after.count().saturating_add(count).min(limit);
+                let merged = after.count().saturating_add(count);
                 after.set_count(merged).map_err(|_| ())?;
-                (count, Some(after))
+                (count, after)
             }
-            Some(_) => (0, None),
+            // A different item, or the same item with a different component patch, is not a
+            // compatible merge: a plain item must not swallow a component-bearing one.
+            Some(_) => (0, held.clone()),
         };
         if inserted == 0 {
             return Ok(0);
         }
-        let Some(after) = after else {
-            return Ok(0);
-        };
+        // Take from the hand first and require the full amount: a hand that cannot supply
+        // what the slot would take aborts the transaction, so the slot never gains items
+        // the player did not pay.
+        let taken = hand.extract(&mut *host, tx, &ItemResource::of(held), inserted);
+        if taken != inserted {
+            return Err(());
+        }
         entity
             .set_item_slot(&mut *host, tx, INPUT_SLOT as u32, Some(after))
             .map_err(|_| ())?;
         let _ = entity.set_changed(&mut *host);
-        let _ = hand.extract(&mut *host, tx, &ItemResource::of(held), inserted);
         Ok(inserted)
     })
     .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// A broken machine keeps its state (upstream's `actuallyadditions:energy` component)
+// ---------------------------------------------------------------------------
+
+/// The vanilla component that carries a block entity's saved data on its item
+/// (`BlockEntity.applyComponentsFromItemStack`).
+const BLOCK_ENTITY_DATA: &str = "minecraft:block_entity_data";
+/// The block entity type id `minecraft:block_entity_data` tags its payload with
+/// (`TypedEntityData.loadInto` only loads data whose `id` names the entity it is placed as).
+const GENERATOR_TYPE_ID: &str = "actuallyadditions:coal_generator_block_entity";
+const CRUSHER_TYPE_ID: &str = "actuallyadditions:crusher_block_entity";
+
+/// A compound's key for `name`. [`Compound`]'s key type is not exported, so the key is taken
+/// from a string tag's own payload: the same conversion a mod's NBT string uses.
+fn key_tag(name: &str) -> Tag {
+    Tag::String(name.into())
+}
+
+/// Write one tag into a compound under `name`.
+fn put(nbt: &mut Compound, name: &str, value: Tag) {
+    if let Tag::String(key) = key_tag(name) {
+        nbt.insert(key, value);
+    }
+}
+
+/// `saved` tagged as `type_id`'s data, under the vanilla component's name: the patch a broken
+/// machine's drop carries.
+fn entity_data_patch(saved: &Compound, type_id: &str) -> Compound {
+    let mut payload = saved.clone();
+    put(&mut payload, "id", Tag::String(type_id.into()));
+    let mut patch = Compound::new();
+    put(&mut patch, BLOCK_ENTITY_DATA, Tag::Compound(payload));
+    patch
+}
+
+/// `Hooks::block_drops`: a broken generator or crusher keeps its saved state on its own item, so a
+/// player who breaks a charged machine and places it again does not lose the FE or the burn
+/// (upstream copies its `actuallyadditions:energy` component; this is the vanilla carrier).
+pub(crate) fn on_block_drops(level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) -> Flow {
+    let Some(block) = level.state_block(event.state) else {
+        return Flow::Continue;
+    };
+    let Some(type_id) = (match block {
+        GENERATOR => Some(GENERATOR_TYPE_ID),
+        CRUSHER => Some(CRUSHER_TYPE_ID),
+        _ => None,
+    }) else {
+        return Flow::Continue;
+    };
+    let Some(entity) = event.block_entity else {
+        return Flow::Continue;
+    };
+    let Some(saved) = level.block_entity_data(entity) else {
+        return Flow::Continue;
+    };
+    let patch = entity_data_patch(&saved, type_id);
+    // A machine's loot is the machine itself, so its state goes on every drop the table made.
+    for drop in event.drops.iter_mut() {
+        let _ = drop.stack.apply_components(&patch);
+    }
+    Flow::Continue
+}
+
+/// The machine item's Part: clamp what a placed item's `block_entity_data` restored. The engine
+/// applies the whole saved compound, including values a stale or edited item could carry.
+pub(crate) struct MachineItemPart;
+
+#[mod_api::horizon_part]
+impl ItemPart for MachineItemPart {
+    fn on_block_placed_by(&self, host: &mut dyn ServerHost, event: &mut OnBlockPlacedByEvent<'_>) {
+        let Some(level) = event
+            .placer
+            .and_then(|player| player.level(&*host))
+            .or_else(|| in_place_level(host))
+        else {
+            return;
+        };
+        let Some(entity) = host.block_entity(level, event.pos) else {
+            return;
+        };
+        let Some(saved) = entity.data(&*host) else {
+            return;
+        };
+        let mut saved = Tag::Compound(saved);
+        let kind = block_id(&*host, level, event.pos);
+        let changed = match kind.as_deref() {
+            Some(GENERATOR) => {
+                let current = read_generator(&saved);
+                let restored = restored_generator(
+                    current.energy,
+                    current.burn as i32,
+                    current.burn_max as i32,
+                );
+                if restored != current {
+                    write_generator(&mut saved, &restored);
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(CRUSHER) => {
+                let current = read_crusher(&saved);
+                let restored = restored_crusher(current.energy, current.progress as i32);
+                if restored != current {
+                    write_crusher(&mut saved, &restored);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if changed && let Tag::Compound(data) = saved {
+            let _ = entity.replace_data(host, data);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -652,7 +819,23 @@ fn insert_from_hand(
 /// `/actuallyadditions info <pos>`: the harness's readout of one machine (a harness addition, as
 /// the 0.1.0 command was; there is no GUI in this slice).
 pub(crate) fn declare_commands(commands: &mut Vec<Command>) {
-    commands.push(Command::new("actuallyadditions info <pos:block_pos>"));
+    // The readout names a crusher's input, its count and its recipe anywhere in the level,
+    // so it is registered at the operator level `/data get block` needs (2, game master) and
+    // its body asks again before reading anything.
+    commands.push(Command::op(
+        "actuallyadditions info <pos:block_pos>",
+        OPERATOR_LEVEL,
+    ));
+}
+
+/// The level `/actuallyadditions info` is registered at: 2, the game master level
+/// `/data get block` needs.
+const OPERATOR_LEVEL: u8 = 2;
+
+/// Whether a command source may read a machine's contents: an operator, or the console
+/// (which always carries level 4).
+fn may_read(permission: mod_api::PermissionLevel) -> bool {
+    permission.level() >= OPERATOR_LEVEL
 }
 
 /// The one line the command prints for the block at `pos`.
@@ -674,21 +857,37 @@ pub(crate) fn status_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
     };
     let saved = Tag::Compound(saved);
     let t = level.game_time(&*host).unwrap_or(0);
-    if kind == GENERATOR {
-        return generator_line(pos, &read_generator(&saved), t);
-    }
-    let input = entity.item_slot(&*host, INPUT_SLOT as u32).ok().flatten();
-    let recipe = input.as_ref().and_then(|stack| find_recipe(&*host, stack));
-    let input = input
-        .as_ref()
+    let fuel = entity
+        .item_slot(&*host, INPUT_SLOT as u32)
+        .ok()
+        .flatten()
         .map(|stack| (stack.item().id(&*host), stack.count()));
-    crusher_line(
-        pos,
-        &read_crusher(&saved),
-        input.as_ref().map(|(item, count)| (item.as_str(), *count)),
-        recipe.as_ref(),
-        t,
-    )
+    if kind == GENERATOR {
+        return generator_line(
+            pos,
+            &read_generator(&saved),
+            fuel.as_ref().map(|(item, count)| (item.as_str(), *count)),
+            t,
+        );
+    }
+    let slot = |index: usize| {
+        entity
+            .item_slot(&*host, index as u32)
+            .ok()
+            .flatten()
+            .map(|stack| (stack.item().id(&*host), stack.count()))
+    };
+    let input = slot(INPUT_SLOT);
+    let recipe = input.as_ref().and_then(|(item, count)| {
+        let key = host.item_key(&Identifier::parse(item).ok()?)?;
+        let stack = ItemStack::new(key, *count)?;
+        find_recipe(&*host, &stack)
+    });
+    let slots = [input, slot(OUTPUT_ONE), slot(OUTPUT_TWO)];
+    let texts = slots
+        .each_ref()
+        .map(|entry| entry.as_ref().map(|(item, count)| (item.as_str(), *count)));
+    crusher_line(pos, &read_crusher(&saved), texts, recipe.as_ref(), t)
 }
 
 /// Run `/actuallyadditions info <pos>`; `Flow::Cancel` when it was ours.
@@ -696,6 +895,12 @@ pub(crate) fn run_command(host: &mut dyn ServerHost, event: &mut RunModCommandEv
     let literals: Vec<&str> = event.command.literals.iter().map(String::as_str).collect();
     if literals.as_slice() != ["actuallyadditions", "info"] {
         return Flow::Continue;
+    }
+    if !may_read(event.source.permission()) {
+        let _ = host.commands().feedback(Text::literal(format!(
+            "actuallyadditions info needs an operator (permission level {OPERATOR_LEVEL})"
+        )));
+        return Flow::Cancel;
     }
     let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
         return Flow::Continue;
@@ -829,6 +1034,16 @@ mod tests {
     }
 
     #[test]
+    fn the_readout_needs_an_operator() {
+        use mod_api::PermissionLevel;
+        assert!(!may_read(PermissionLevel::All));
+        assert!(!may_read(PermissionLevel::Moderators));
+        assert!(may_read(PermissionLevel::Gamemasters));
+        assert!(may_read(PermissionLevel::Owners));
+        assert_eq!(OPERATOR_LEVEL, 2);
+    }
+
+    #[test]
     fn the_generator_has_one_insert_only_fuel_slot() {
         let container = generator_container();
         assert_eq!(container.slots, GENERATOR_SLOTS, "one fuel slot");
@@ -932,8 +1147,9 @@ mod tests {
             burn_max: 1_600,
         };
         assert_eq!(
-            generator_line([0, 100, 0], &state, 324),
-            "Coal Generator at 0,100,0: 1940/60000 FE (comparator 0, burning 1503/1600 ticks, t=324)"
+            generator_line([0, 100, 0], &state, Some(("minecraft:coal", 4)), 324),
+            "Coal Generator at 0,100,0: 1940/60000 FE (comparator 0, burning 1503/1600 ticks, \
+             fuel minecraft:coal x4, t=324)"
         );
     }
 
@@ -953,17 +1169,22 @@ mod tests {
             crusher_line(
                 [1, 100, 0],
                 &state,
-                Some(("minecraft:coal_ore", 1)),
+                [
+                    Some(("minecraft:coal_ore", 1)),
+                    Some(("minecraft:coal", 3)),
+                    None
+                ],
                 Some(&recipe),
                 488
             ),
             "Crusher at 1,100,0: 3600/60000 FE (comparator 0, progress 0/100, input \
-             minecraft:coal_ore x1, crushing into minecraft:coal x3, bonus none, t=488)"
+             minecraft:coal_ore x1, out0 minecraft:coal x3, out1 empty, crushing into \
+             minecraft:coal x3, bonus none, t=488)"
         );
         assert_eq!(
-            crusher_line([4, 100, 0], &Crusher::new(), None, None, 607),
+            crusher_line([4, 100, 0], &Crusher::new(), [None, None, None], None, 607),
             "Crusher at 4,100,0: 0/60000 FE (comparator 0, progress 0/100, input empty, \
-             crushing into nothing, bonus none, t=607)"
+             out0 empty, out1 empty, crushing into nothing, bonus none, t=607)"
         );
     }
 
@@ -976,7 +1197,13 @@ mod tests {
                            {"chance": 0.5, "result": {"id": "minecraft:flint", "count": 1}}]}"#,
         )
         .expect("the gravel recipe parses");
-        let line = crusher_line([1, 100, 0], &Crusher::new(), None, Some(&recipe), 7);
+        let line = crusher_line(
+            [1, 100, 0],
+            &Crusher::new(),
+            [None, None, None],
+            Some(&recipe),
+            7,
+        );
         assert!(
             line.contains("crushing into minecraft:flint x1, bonus minecraft:flint x1 @ 50%"),
             "{line}"
@@ -984,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn the_command_is_the_readout_it_was_at_0_1_0() {
+    fn the_command_is_the_readout_at_the_operator_level() {
         let mut commands = Vec::new();
         declare_commands(&mut commands);
         assert_eq!(commands.len(), 1);
@@ -992,18 +1219,71 @@ mod tests {
             commands[0].usage, "actuallyadditions info <pos:block_pos>",
             "the 0.1.0 spelling, with the three words parsed as one block position"
         );
-        assert_eq!(commands[0].level, 0, "no permission level, as at 0.1.0");
+        assert_eq!(
+            commands[0].level, OPERATOR_LEVEL,
+            "the readout names another player's machine contents, so it needs an operator"
+        );
+    }
+
+    #[test]
+    fn a_broken_machines_drop_carries_its_saved_compound_tagged_with_the_type() {
+        let mut saved = compound();
+        let state = Generator {
+            energy: 1_940,
+            burn: 1_503,
+            burn_max: 1_600,
+        };
+        write_generator(&mut saved, &state);
+        let Tag::Compound(saved) = saved else {
+            panic!("write_generator keeps the compound");
+        };
+        let patch = Tag::Compound(entity_data_patch(&saved, GENERATOR_TYPE_ID));
+        let Some(payload) = patch.get(BLOCK_ENTITY_DATA) else {
+            panic!("the patch names the vanilla component");
+        };
+        assert_eq!(
+            payload.get("id"),
+            Some(&Tag::String(GENERATOR_TYPE_ID.into())),
+            "the payload names the block entity type it is placed as"
+        );
+        let Some(Tag::Compound(payload)) = payload.into() else {
+            panic!("the payload is a compound");
+        };
+        assert_eq!(
+            read_generator(&Tag::Compound(payload.clone())),
+            state,
+            "the item carries exactly the FE and burn the machine held"
+        );
+
+        let mut crusher = compound();
+        write_crusher(
+            &mut crusher,
+            &Crusher {
+                energy: 3_600,
+                progress: 9,
+            },
+        );
+        let Tag::Compound(crusher) = crusher else {
+            panic!()
+        };
+        let patch = Tag::Compound(entity_data_patch(&crusher, CRUSHER_TYPE_ID));
+        assert_eq!(
+            patch.get(BLOCK_ENTITY_DATA).and_then(|p| p.get("id")),
+            Some(&Tag::String(CRUSHER_TYPE_ID.into()))
+        );
     }
 
     #[test]
     fn a_machine_line_and_a_status_read_name_the_same_two_blocks() {
         assert_ne!(GENERATOR, CRUSHER);
         assert!(
-            generator_line([0, 100, 0], &Generator::new(), 0).starts_with("Coal Generator at "),
+            generator_line([0, 100, 0], &Generator::new(), None, 0)
+                .starts_with("Coal Generator at "),
             "the generator's line names the block the jar calls coal_generator"
         );
         assert!(
-            crusher_line([0, 100, 0], &Crusher::new(), None, None, 0).starts_with("Crusher at "),
+            crusher_line([0, 100, 0], &Crusher::new(), [None, None, None], None, 0)
+                .starts_with("Crusher at "),
             "the crusher's line names the block the jar calls crusher"
         );
         assert_eq!(

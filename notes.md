@@ -162,10 +162,9 @@ expectation and the run fails at it (`FAIL: SELFTEST flipped: the generator made
    generator's smoke/`CRIT` random-tick particles; this slice writes no block
    state (the carried `lit=false` model is what shows). The furnace template's
    `lit` light 13 would apply if it were set.
-3. **Breaking a machine loses its FE.** Upstream's loot copies the
-   `actuallyadditions:energy` component; the component type is not registered in
-   this slice, and the loot tables were patched to drop the block (an unknown
-   component would have dropped nothing).
+3. ~~**Breaking a machine loses its FE.**~~ **Closed by slice 2 (0.2.2)**: a broken machine's
+   saved compound travels as vanilla `minecraft:block_entity_data` and is clamped back when the
+   item is placed again (see "Slice 2" below).
 4. **The two machine recipes ship but do not craft yet.** They need
    `black_quartz`, `restonia_crystal`, `iron_casing` and `basic_coil` (later
    slices); the `c:` tags those recipes use are not in 26.3 either.
@@ -536,5 +535,217 @@ the `[[versions]]` record and links the file, and a **maintainer** runs `scripts
 `check` before that is the expected `fetch.sh` failure). The orchestrator's
 `python3 ports/tools/publish-ready.py actuallyadditions` does the bookkeeping; this job owns no
 submission. The port stays local-only until the maintainer approves publishing (ARCHITECTURE.md §8).
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port
+
+## Review fixes (2026-11-18) — registry source review #1230
+
+Skills: superpowers/using-superpowers,systematic-debugging,test-driven-development,verification-before-completion; BeautifulRust/rust-best-practices
+
+File: `var/review-all/1230-actuallyadditions.md`. Package **0.2.1**, `actuallyadditions.hmod`
+97,276 B, sha256 `0ce6483c0e7fbcbfac4bb3c8c74ff9f0fbb2aacfddd5ac52e78834aa43110854`.
+
+1. **`src/support.rs:655` the public coordinate readout revealed a crusher's input id/count and
+   its recipe anywhere in the level.** `info` is declared `Command::op(…, 2)` (the level
+   `/data get block` needs) and its body re-checks `may_read(permission)`; a non-machine still
+   gets the generic `No Actually Additions machine there.` Pinned by
+   `the_readout_needs_an_operator`, the updated `the_command_is_the_readout_at_the_operator_level`,
+   the in-game de-op phase, and the non-machine control (the command test now asserts the level).
+2. **`src/support.rs:620` input insertion rebuilt the stack from its item id and count (stripping
+   components), merged on id alone, and committed without checking the hand supplied the full
+   amount.** The slot now keeps the caller's own stack (`held.clone()` with the new count), only
+   merges with a stack that `is_stackable_with` (same item **and** component patch), extracts
+   from the hand **first** and aborts the transaction unless the full amount came out (the slot
+   never gains items the player did not pay). Pinned in game by the new phase: a named coal must
+   not merge into the plain coal in the fuel slot (the slot stays at four, the hand keeps the
+   named one). `cargo test`: **27 passed**.
+
+**Found by the in-game leg (fixed here, not in the reviewer's list).**
+
+1. **The package could not load.** `declare` registered each Part twice (`block_part` *and*
+   `block_entity_part`, which already expands to the type's blocks), and the game refused it
+   (*"GeneratorPart is attached to actuallyadditions:coal_generator twice"*); and the carried
+   `data/actuallyadditions/recipe/crushing/*.json` had no serializer (*"unregistered recipe
+   serializer actuallyadditions:crushing"*). The Part is now attached once (through its type) and
+   `declare` registers the recipe type with an object-preserving raw serializer.
+2. **The harness's container path does not reach a mod block entity** (`ctl container` reads the
+   engine's vanilla container map, which these machines do not use). The e2e now feeds by the
+   player's right click and reads the `/actuallyadditions info` line; that line gained the slot
+   counts it needed (`fuel …` on the generator, `out0`/`out1` on the crusher) so every assertion is
+   still on real contents.
+
+In-game: `PASS` + `E2E EXIT:0` (`ports/_shared/evidence/actuallyadditions-e2e/e2e-launcher.log`),
+control `EXIT:1`. The component test is the phase after the fuel click (a named coal stays in the
+hand, the four plain coal stay in the slot) and the de-op phase is the readout gate.
+
+## Slice 2 (0.2.2, 2026-11-21) — a broken machine keeps its FE, burn and progress
+
+**Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` (Nightly 2026-11-20) + mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, SDK `package_format` 6 / `content_api` 0.2. The
+previous package (0.2.1) was built at `0b14f8a`; 0.2.2 is the same behaviour **repinned** plus
+this slice. `src/runtime.rs` gained the restored-state rules and is otherwise unchanged.
+
+**The gap line** (`## Deviations and gaps (slice 1)` item 3): *"Breaking a machine loses its FE.
+Upstream's loot copies the `actuallyadditions:energy` component; the component type is not
+registered in this slice, and the loot tables were patched to drop the block (an unknown
+component would have dropped nothing)."* Upstream `TileEntityCoalGenerator`/`TileEntityCrusher`
+save `Energy`/`BurnTime`/`MaxBurnTime`/`FirstCrushTime`, and the mod's loot copies them onto the
+dropped item, so a player who picks a machine up and places it again finds it as it was. This
+slice restores that with the carrier the pin documents, not a bespoke component: the block
+entity's saved compound travels as vanilla **`minecraft:block_entity_data`** (the route proved in
+game by `rftoolsutility` and recorded in `ARCHITECTURE.md` §3).
+
+### Why this family, and what was tried first
+
+The scoreboard said the #1 gap was the **GUI/screen** (`machines` tier lists menus/screens), so
+that was built first: two content menu types (`data/actuallyadditions/horizon/menu/`), the
+containers naming them, `menu_slot_rules` for the fuel/input filters, a `screen` layout at
+upstream's `Slot` coordinates and a `screen_draw` over the carried `gui_coal_generator` /
+`gui_grinder` / `gui_inventory` textures. It **cannot work at this pin in single player**, and the
+measurement is worth keeping for the campaign:
+
+- a right click *does* open the content menu (`ctl interact` answers `"screen":"container"`), but
+  the client has no mod screen: `BlockEntity::Mod` then contributes **zero** container slots
+  (`game.rs::slots`/`slot_count` fall back to the player's 36), so `ctl menu` lists no slot 300
+  and the machine cannot be fed through it;
+- the reason is in the engine: `open_native_screen` (which asks the mod's `screen` hook) is called
+  only from the **remote client's** container-open path (`game/remote.rs`, `handleOpenScreen`); the
+  single-player use path (`game.rs::open_menu` → `open_mod_menu`) sets `self.container` and
+  `Screen::Inventory` without it, and `self.remote` is `None` in single player. The docs agree:
+  *"a Horizon client shows it through the mod's own screen; without one it closes again."*
+- `ctl screen` **hangs** (no reply, killed by the e2e guard) with a mod container open in
+  `--headless`, so the screen also cannot be read through the harness.
+
+The GUI code was reverted rather than shipped: a single-player machine whose right click opens a
+container with no machine slots is worse than the slice-1 right-click insert. Recorded as
+`blocked(no-single-player-mod-screen)` for the campaign — every `machines`-tier port that wants a
+content menu hits it. The next slice below keeps the right-click insert and closes the
+state-persistence gap.
+
+### Behaviour (read from upstream, implemented in Rust)
+
+| Item | Upstream | This port |
+|---|---|---|
+| generator saved state | `Energy`, `BurnTime`, `MaxBurnTime` | the same ints in the BE's saved compound (`energy`, `burn`, `burn_max`) |
+| crusher saved state | `Energy`, `FirstCrushTime` | `energy`, `progress` |
+| carry on break | loot copies the `actuallyadditions:energy` component | `Hooks::block_drops` writes the saved compound as `minecraft:block_entity_data`, tagged with the BE type id |
+| restore on place | `BlockItem.updateCustomBlockEntityTag` applies it | vanilla applies the component when the item is placed; the item's Part clamps it |
+| clamp | upstream trusts the component | `runtime::restored_generator` / `restored_crusher`: buffer clamped to 60,000, burn to `0..=burn_max`, progress to `0..=99` (never at the tick that would finish) |
+
+The clamp is not cosmetic: a stale or edited item can name any int, and a progress of `100` would
+finish an operation on its next tick without the input the operation needs.
+
+### TDD
+
+The two rules were written as failing tests first (`todo!()` bodies), then implemented:
+
+```
+---- runtime::tests::a_restored_crusher_cannot_start_at_the_end_of_an_operation stdout ----
+thread 'runtime::tests::a_restored_crusher_cannot_start_at_the_end_of_an_operation' (105755) panicked at src/runtime.rs:323:5:
+not yet implemented: a restored progress must not begin at the operation's end
+
+---- runtime::tests::a_restored_generator_is_clamped_into_its_buffer_and_burn stdout ----
+thread 'runtime::tests::a_restored_generator_is_clamped_into_its_buffer_and_burn' (105756) panicked at src/runtime.rs:316:5:
+not yet implemented: the saved burn and buffer need clamping on placement
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 28 filtered out
+```
+
+Green afterwards: **30 passed, 0 failed** (`runtime::` 17, `support::` 13).
+
+### Ladder (slot `W1-actuallyadditions`, `CARGO_INCREMENTAL=0`)
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **30 passed**, 0 failed — `evidence/actuallyadditions/sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **100,946 B** both, `cmp` identical, `sha256 483f4e11…e253ad` — `sdk-build.log`, `sdk-build-second.log` |
+| registry check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.2 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **100,946 bytes**, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 (a tautology) — `sdk-fits.log` |
+| fits, a different build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` | **1/1** |
+
+Every log above prints the package's sha256 and size, and the source hashes in `sdk-test.log`.
+The archive is **90 entries** with **no `Cargo.lock`** (the lock stays in the source tree because
+`launcher native-build` reads it; `cargo horizon-mod build` packs it only when present, so the
+delivered build is made with it removed and the tree's lock restored afterwards).
+
+### In-game transcript (`evidence/actuallyadditions-e2e/e2e-launcher.log`, 0.2.2)
+
+```
+package: …/actuallyadditions.hmod, 100946 bytes, sha256 483f4e112a6277cdb7e49026a01e6bb4faeb69811614eeff64c6cde32fe253ad
+  before the break: Coal Generator at 10,100,-2: 1800/60000 FE (comparator 0, burning 1510/1600 ticks, fuel empty, t=972)
+  dropped: [{"count":1,"item":"actuallyadditions:coal_generator"}]
+  held after the walk: actuallyadditions:coal_generator
+  after placing it again: Coal Generator at 6,100,-2: 2840/60000 FE (comparator 0, burning 1458/1600 ticks, fuel empty, t=1138)
+  FE 1800 -> 2840, burn 1509/1600 -> 1458/1600
+  the broken machine kept its FE and its burn
+  a harness-given machine: Coal Generator at 8,100,-2: 0/60000 FE (comparator 0, burning 0/0 ticks, fuel empty, t=1157)
+PASS: …
+EXIT:0
+```
+
+The FE rises after placement because the machine resumes burning (1800 → 2840 over the ten seconds
+between the two reads); the differential is the fresh machine beside it at `0/0`, so the value is
+the broken machine's own state and not a default.
+
+Legs (all `check-e2e-logs.py actuallyadditions-e2e --strict` → **logs=3 ok=3**):
+
+| Leg | Verdict |
+|---|---|
+| `e2e-launcher.log` | `PASS` + `EXIT:0` |
+| `e2e-launcher-selftest.log` | `FAIL: SELFTEST flipped: the placed machine kept 2820 FE, not 0` + `EXIT:1` |
+| `e2e-launcher-control.log` | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` (the same Nightly without the package) |
+
+Harness facts measured while getting there:
+
+- `ctl entities`/`ctl inventory` print a stack's components through `encode_components`, which
+  **omits `minecraft:block_entity_data`**; a probe that looked for it there read "no component"
+  while placement proved the component was there. Assert the behaviour (place it again), not the
+  JSON patch.
+- `ctl screen` does not answer with a mod container open in `--headless` (the e2e guard killed the
+  run after 900 s); `ctl menu` is the working readout.
+- `ctl look-at-block` refuses a position that holds air, so the restore step places at the target
+  coordinates without looking at them first; and the drop is picked up by walking to the block's
+  *centre* (`x+0.5, z+0.5`), not to the block coordinate.
+- A survival break needs a real tool (`iron_pickaxe`) and the player within reach; the scenario
+  returns to creative before the pickup so a wandering mob cannot decide the run.
+- **The operator readout phase was vacuous and is fixed.** It used `deop` + a grep, and both
+  `op`/`deop` are dedicated-server commands an integrated server refuses, so the grep matched the
+  failed `deop`'s own refusal (HANDOVER §9d 6). It is now a LAN guest at permission level 0 with a
+  differential: the same guest runs `/help` and `/list` (so its command path is alive) and only
+  then asks `/actuallyadditions info`, which is refused with no readout in its window. From the
+  delivered run: `the level-0 guest runs /help: /trigger <objective> [add|set]`,
+  `the level-0 guest runs /list: There are 2 of a max of 8 players online: …`, `as a level-0
+  guest: … Unknown or incomplete command …` — and the owner reads the crusher again afterwards.
+
+### Coverage (slice 2)
+
+| Family | State |
+|---|---|
+| generator tick, burn, FE, fuel consumption, refusal | tested (slice 1 phases, unchanged) |
+| crusher recipe/progress/FE/outputs, bonus roll unit-tested | tested (slice 1 phases; bonus roll remains unit-only) |
+| generator→crusher FE move at `level_tick_post` | tested (adjacent pair, slice 1) |
+| `/actuallyadditions info` (parsed reply, level-2 gate) | **tested** — owner reads the line, a level-0 LAN guest is refused after `/help` and `/list` answer the same guest |
+| break carries a machine's saved state (generator) | **tested** — break → drop → pick up → place → `info` keeps FE and burn, fresh machine at 0 |
+| break carries a machine's saved state (crusher) | **not ported/tested in game** — the crusher shares the hook and type ids (unit test pins its payload) but the leg breaks the generator only; a crusher phase is the next slice's first step |
+| clamp on placement (corrupt `burn`, `progress`, buffer) | unit-tested (`restored_generator`, `restored_crusher`); not reachable from `ctl` |
+| GUI / menu / screen | **blocked(no-single-player-mod-screen)** — see above, code reverted |
+| machine recipes | **not crafting** — carried, and the load log now names why: `recipes: invalid ingredient (unresolved tag or malformed input): "#c:cobblestones"` plus the missing `iron_casing`/`basic_coil`/`restonia_crystal` (the crafting-chain gap; next but one) |
+
+### Gaps after slice 2
+
+Everything in the 0.1.0/0.2.0 lists still stands except item 3 of the slice-1 deviation list
+(**breaking a machine loses its FE — closed**). Added/changed here:
+
+1. **No GUI** — now `blocked(no-single-player-mod-screen)` rather than "deferred": the pin cannot
+   show a content menu's slots on the single-player host, so the right-click insert stays.
+2. **The crusher's own break/place leg** is unit-tested only (see the coverage table).
+3. **The two machine recipes still do not craft**, and the load log names the unresolved
+   `#c:cobblestones`. The crafting chain (`iron_casing`, `basic_coil`, `restonia_crystal`,
+   `black_quartz`) is the next family; `black_quartz` needs the ore, which is worldgen.
+4. `minecraft:block_entity_data` carries the **whole** saved compound, including any future keys;
+   the clamp covers the three values this slice writes, and a later key needs its own clamp.
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port

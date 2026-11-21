@@ -27,8 +27,9 @@
 //! | `perform-command` (8) | [`Mod::run_mod_command`] (typed `CommandInvocation`) |
 //! | `world-lifecycle` (v1) | [`Mod::world_lifecycle`] (drop the recipe cache and the push queue) |
 use mod_api::{
-    self, Flow, Hooks, HostSide, LevelTickPostEvent, RegisterCommandsEvent, Registrar,
-    RegistrationContext, RunModCommandEvent, ServerHost, WorldLifecycleEvent,
+    self, BlockDropsEvent, Flow, Hooks, HostSide, LevelHost, LevelTickPostEvent,
+    RegisterCommandsEvent, Registrar, RegistrationContext, RunModCommandEvent, ServerHost,
+    WorldLifecycleEvent,
 };
 
 pub mod runtime;
@@ -72,5 +73,11 @@ impl Hooks for Mod {
     fn world_lifecycle(&self, _host: &mut dyn ServerHost, _event: &mut WorldLifecycleEvent<'_>) {
         support::reset_recipes();
         support::clear_push_queue();
+    }
+
+    /// A block broke: a machine's item keeps its saved state (FE, burn, progress), which vanilla
+    /// applies when the item is placed again (upstream's `actuallyadditions:energy` component).
+    fn block_drops(&self, level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) -> Flow {
+        support::on_block_drops(level, event)
     }
 }

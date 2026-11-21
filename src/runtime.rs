@@ -1,4 +1,5 @@
-// Pure machine logic for Actually Additions slice 1 (Coal Generator, Crusher).
+// Pure machine logic for Actually Additions slice 2 (Coal Generator, Crusher, and the
+// state a broken machine carries on its item).
 //
 // This file is both the standalone Cargo library and the injected
 // `crate::game::actuallyadditions` module. It has no game types: the hook
@@ -303,6 +304,33 @@ pub fn is_fuel(burn_time: u32) -> bool {
     burn_time > 0
 }
 
+// ---------------------------------------------------------------------------
+// The state a broken machine carries on its item (upstream's `actuallyadditions:energy`)
+// ---------------------------------------------------------------------------
+
+/// What a generator comes back with when its item is placed again. A broken machine's item
+/// carries the block entity's saved compound and vanilla applies it whole, so a stale or edited
+/// item can name any int: this clamps it into the buffer and the burn the machine declares.
+#[must_use]
+pub fn restored_generator(energy: i32, burn: i32, burn_max: i32) -> Generator {
+    let burn_max = burn_max.max(0) as u32;
+    Generator {
+        energy: clamp_energy(energy, GENERATOR_CAPACITY),
+        burn: (burn.max(0) as u32).min(burn_max),
+        burn_max,
+    }
+}
+
+/// What a crusher comes back with: its buffer clamped, and its progress never at or past the
+/// tick that would finish the operation (`Crusher::tick` resets progress at `CRUSHER_TICKS`).
+#[must_use]
+pub fn restored_crusher(energy: i32, progress: i32) -> Crusher {
+    Crusher {
+        energy: clamp_energy(energy, CRUSHER_CAPACITY),
+        progress: (progress.max(0) as u32).min(CRUSHER_TICKS - 1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,5 +586,61 @@ mod tests {
             bonus_for(&recipe(COAL_ORE), 0.0).is_none(),
             "a single-result recipe never rolls"
         );
+    }
+
+    #[test]
+    fn a_restored_generator_is_clamped_into_its_buffer_and_burn() {
+        assert_eq!(
+            restored_generator(1_940, 1_503, 1_600),
+            Generator {
+                energy: 1_940,
+                burn: 1_503,
+                burn_max: 1_600
+            },
+            "a machine broken mid-burn comes back exactly as it was"
+        );
+        assert_eq!(
+            restored_generator(70_000, -5, 1_600),
+            Generator {
+                energy: GENERATOR_CAPACITY,
+                burn: 0,
+                burn_max: 1_600
+            },
+            "a stale buffer clamps to capacity and a negative burn is empty"
+        );
+        assert_eq!(
+            restored_generator(100, 2_000, 1_600),
+            Generator {
+                energy: 100,
+                burn: 1_600,
+                burn_max: 1_600
+            },
+            "a burn past its own maximum would burn longer than its fuel allows"
+        );
+        assert_eq!(
+            restored_generator(0, 5, 0),
+            Generator::new(),
+            "burn without a maximum is no burn"
+        );
+    }
+
+    #[test]
+    fn a_restored_crusher_cannot_start_at_the_end_of_an_operation() {
+        assert_eq!(
+            restored_crusher(3_600, 50),
+            Crusher {
+                energy: 3_600,
+                progress: 50
+            }
+        );
+        assert_eq!(
+            restored_crusher(70_000, 120),
+            Crusher {
+                energy: CRUSHER_CAPACITY,
+                progress: CRUSHER_TICKS - 1
+            },
+            "progress starts before the tick that would finish, never at or past it"
+        );
+        assert_eq!(restored_crusher(-1, -3), Crusher::new());
     }
 }

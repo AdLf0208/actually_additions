@@ -101,7 +101,7 @@ world).
 
 ## The rest of the mod (next slices, from `mod/tile/`)
 
-Machines seen upstream, for planning — **not** in slice 1:
+Machines seen upstream, for planning — **not** in slice 1 or 2:
 
 - **Generation/energy**: Coal Generator (this slice), Oil Generator, Leaf
   Generator, Heat Collector, Furnace Solar, Bio Reactor, Firework Box,
@@ -133,7 +133,13 @@ Machines seen upstream, for planning — **not** in slice 1:
   type read from the pin's custom-recipe table, FE buffers through API 142,
   containers, the generator→crusher energy link, and an `/actuallyadditions
   info` readout.
-- **Not in slice 1**: the GUI/screen (upstream `GuiCoalGenerator`,
+- **Slice 2 (0.2.2)**: the saved-state carry — a broken machine's `Energy`/`BurnTime`/
+  `MaxBurnTime` (and the crusher's `FirstCrushTime`) travel on its own item as vanilla
+  `minecraft:block_entity_data` and are clamped back on placement, upstream's
+  `actuallyadditions:energy` behaviour. The GUI was attempted and reverted: the pin cannot show a
+  content menu's slots on the single-player host (`blocked(no-single-player-mod-screen)`, see
+  `notes.md`).
+- **Not in slice 1/2**: the GUI/screen (upstream `GuiCoalGenerator`,
   `CrusherScreen`), the Double Crusher, redstone control, item/fluid pipes,
   energy relays/cables (the adjacency link stands in), sounds/particles, the
   crafting chain that makes the two machines craftable

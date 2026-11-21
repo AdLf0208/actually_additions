@@ -1,18 +1,30 @@
 # Validation
 
-**0.2.0 (the SDK package, 2026-11-18)** is validated by the migration ladder in
-[`notes.md`](notes.md) → "Migration to the SDK format": `cargo test` **26 passed / 0 failed**
-(15 `runtime::`, 11 `support::`), `cargo clippy --all-targets -- -D warnings` **0 warnings**,
-`cargo fmt --check` clean, `cargo horizon-mod build` twice with the same 95,503 B /
-sha256 `2367bd09…c311`, `cargo horizon-mod check` and `fits --build nightly` exit 0, and
-`unzip -p actuallyadditions.hmod src/runtime.rs | sha256sum` equal to the retired
-`mixins/actuallyadditions/runtime.rs` (`df6c993a…c683`). Every log is under
-`ports/_shared/evidence/actuallyadditions/sdk-*.log`.
+**0.2.2 (2026-11-21, pin `0a875da`)** — slice 2: a broken machine keeps its saved state.
 
-**No 0.2.0 in-game run exists.** A native `.hmod` is built by `horizon-launcher native-build`,
-which is not installed in this environment; `tools/e2e.sh` is updated for a launcher-built game
-(`GAME=`, optional `CONTROL_GAME=`, `SELFTEST=1`) and unrun. The 0.1.0 runs below remain the
-behaviour's evidence, for a `src/runtime.rs` that did not change.
+| Check | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **30 passed / 0 failed** (`runtime::` 17, `support::` 13) — `evidence/actuallyadditions/sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | 100,946 B, `cmp` identical, sha256 `483f4e11…e253ad`, **90 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | EXIT 0 (`actuallyadditions 0.2.2 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`) — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` (a tautology) |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1** |
+| in-game | `tools/e2e.sh` on the launcher-built game | `PASS` + `EXIT:0` — `evidence/actuallyadditions-e2e/e2e-launcher.log` |
+| counterfactual | `SELFTEST=1 tools/e2e.sh` | `FAIL: SELFTEST flipped: the placed machine kept 2820 FE, not 0` + `EXIT:1` — `e2e-launcher-selftest.log` |
+| control | the same script on the same Nightly **without** the package | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `python3 ports/tools/check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=3 ok=3` |
+
+Every log prints the package's sha256 and size it was run against (and `sdk-test.log` the three
+source hashes). The launcher build used for the in-game leg is
+`native-0a875da-ec01b0d091ee`, exported to `~/.cache/horizon-e2e/0a875da/actuallyadditions/`.
+
+Historical: the 0.2.1 and 0.2.0 logs are under
+`evidence/actuallyadditions/retired-0.2.1/` and `evidence/actuallyadditions-e2e/retired-0.2.1/`;
+they were made at `0b14f8a` and describe the same code without slice 2. The 0.1.0 `.hnmod` runs
+below remain the record of the retired container.
 
 ## 0.1.0 (the retired `.hnmod` bundle) — historical
 

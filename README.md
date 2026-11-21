@@ -1,19 +1,24 @@
-# Actually Additions — a Horizon port
+# Actually Additions → Horizon (slice 1)
 
-**Actually Additions** is a Minecraft mod. A Minecraft Mod about lots of useful gadgets and things!. This repository is a **port of it to [Horizon](https://github.com/horizon-rust/horizon)**, the Rust engine for Minecraft Java 26.3. It carries the complete source of the port plus the content files it ships, and installs as a single `.hmod` package.
+The **Coal Generator** and the **Crusher** of Actually Additions 1.3.26
+(`Ellpeck/ActuallyAdditions`, **MIT**) as one flat SDK package (mod API `0.2`, version `0.2.0`),
+built by the launcher against Horizon `0b14f8acfd97fa2c750e42795249dcc981178ca4` and mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0` for Minecraft 26.3.
 
-Upstream: [Ellpeck/ActuallyAdditions](https://github.com/Ellpeck/ActuallyAdditions) — licence **MIT**.
+- [`FINDINGS.md`](FINDINGS.md) — upstream behaviour read from the source, the slice boundary and
+  the mod's remaining machine list.
+- [`notes.md`](notes.md) — scope, the retired-hook → SDK mapping, verification, deviations, gaps
+  and every migration trap.
+- `horizon-mod.toml` — the one manifest and identity (`capabilities = ["registries"]`, `[native]`
+  pins); `Cargo.toml` + `src/lib.rs` — the one `impl mod_api::Hooks`; `src/support.rs` — the glue
+  (the two block-entity Parts, the container and energy declarations, the clicks, the command);
+  `src/runtime.rs` — the pure, unit-tested machine logic, byte-identical to the retired bundle's.
+- `assets/`, `data/` — the carried content, reproduced by `tools/assemble_content.py` from the raw
+  carry of the ATM10 jar (`ports/_shared/carry-work/actuallyadditions/carry/`, Modrinth SHA-1
+  `bd1826f117065dc3d73f0a7197091a4c37829a06`) and patched as [`notes.md`](notes.md) records;
+  `tools/stamp_license.py` copies the licence and notice into `data/actuallyadditions/license/`.
 
-| | |
-|---|---|
-| Upstream mod | Actually Additions ([source](https://github.com/Ellpeck/ActuallyAdditions)) |
-| Ported to | Horizon 0b14f8a, Minecraft Java 26.3, mod API `0.2` |
-| Package | `actuallyadditions.hmod` (install it with the Horizon launcher) |
-| Licence | **MIT** — the upstream mod's licence; see [Licence and credit](#licence-and-credit) |
-
-## What this port implements
-
-### What the slice does
+## What the slice does
 
 | | Upstream | Here |
 |---|---|---|
@@ -29,47 +34,19 @@ Not ported, and recorded as gaps in [`notes.md`](notes.md): the GUI, the Double 
 other ~45 machines, redstone control, relays/cables, the crafting chain, worldgen, the booklet,
 `lit`/comparator/particles, and keeping the FE on a broken machine.
 
-## Not yet ported
+## Quick checks
 
-- **No GUI/screen.** Upstream opens a container screen; this slice inserts by
-- **`lit` is never set.** Upstream sets the crusher's `lit` (light 12) and the
-- **Breaking a machine loses its FE.** Upstream's loot copies the
-- **The two machine recipes ship but do not craft yet.** They need
-- **2 of the 49 crushing recipes are skipped**: `black_quartz_ore` and `rice`
-- **The bonus roll is unit-tested, not asserted in-game**: the 50 % gravel
-- **No comparator output.** `comparator_strength` is computed (and printed), but
-- **No client sync** of energy/progress (`block_entity_update_tag` is not
-
-## Installing
-
-1. Install the [Horizon launcher](https://github.com/horizon-rust/horizon/releases) (0.2.70 or newer).
-2. Add `actuallyadditions.hmod` to the instance's mods.
-3. The package is pinned to a specific Horizon build; the launcher checks that pin.
-
-## Licence and credit
-
-Actually Additions was created by its upstream authors; the code, models and assets in the original mod
-remain theirs and are used here under **MIT**. The Rust in this repository is a clean-room
-rewrite for Horizon, not a translation of the original source.
-
-- `LICENSE` — the upstream licence text.
-- `LICENSE-NOTICE.md` — what this port carries and where it came from.
-- The upstream project: https://github.com/Ellpeck/ActuallyAdditions
-
-## Technical details
-
-```
-horizon-mod.toml   package manifest (id, version, api, [native] pin)
-Cargo.toml         the crate; depends on `horizon-mod-api` from the fetched SDK
-src/               lib.rs (the one `impl Hooks`), runtime.rs (pure logic + tests), glue
-assets/ data/      the content the package ships
-tools/             content generators and the e2e scenario
+```sh
+cargo test --all-targets                                   # 26 tests: 15 runtime, 11 glue
+cargo clippy --all-targets -- -D warnings                   # 0 warnings
+cargo fmt --check                                           # not --all: that checks the fetched SDK
+rm -f Cargo.lock && cargo horizon-mod build                 # target/horizon-mod/actuallyadditions.hmod
+cargo horizon-mod check actuallyadditions.hmod              # the registry's package check
+cargo horizon-mod fits actuallyadditions.hmod --build nightly
+GAME=<launcher-built horizon-client> tools/e2e.sh           # SELFTEST=1 must fail
 ```
 
-- Build: `cargo horizon-mod build` (packages; it does not compile against the game).
-- Test: `cargo test`, `cargo clippy --all-targets -- -D warnings`.
-- In-game: `ports/tools/launcher-game.sh run actuallyadditions` in the campaign tree, or install the
-  `.hmod` and play; the harness scenario is `tools/e2e.sh`.
-
-This repository is generated from the campaign's port at `ports/actuallyadditions/`; the port's own
-`notes.md` is the full record (decisions, traps, evidence).
+`GAME` comes from `horizon-launcher native-build .`, which is **not installed here**, so no 0.2.0
+in-game run exists; the 0.1.0 runs in `ports/_shared/evidence/actuallyadditions/` are the
+behaviour's evidence for a `src/runtime.rs` that did not change. Local-only until the maintainer
+approves publishing (ARCHITECTURE.md §8).
