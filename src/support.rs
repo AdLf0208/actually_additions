@@ -7,8 +7,8 @@
 //! *declares* (one insert-only fuel slot, three crusher slots, an output-only and an input-only
 //! buffer), that the state written to the saved compound reads back, and the exact lines
 //! `/actuallyadditions info` prints.
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use mod_api::{
     self, BlockClick, BlockDropsEvent, BlockEntityEvent, BlockEntityPart, BlockEntityTickEvent,
@@ -88,6 +88,9 @@ pub(crate) fn declare(r: &mut dyn Registrar, context: &RegistrationContext) {
     let crusher_item = r.item_key(CRUSHER);
     r.item_part(generator_item, MachineItemPart);
     r.item_part(crusher_item, MachineItemPart);
+    // `block_drops` cannot name an item; it matches a drop against these two keys.
+    let _ = GENERATOR_ITEM.set(generator_item);
+    let _ = CRUSHER_ITEM.set(crusher_item);
     // `block_entity_part` attaches the Part to the type's blocks as well, so registering
     // `GeneratorPart`/`CrusherPart` with `block_part` first would attach it twice and the game
     // refuses a duplicate ("attached twice, by actuallyadditions and actuallyadditions").
@@ -719,10 +722,50 @@ fn put(nbt: &mut Compound, name: &str, value: Tag) {
     }
 }
 
+/// Read one tag from a compound by `name`, the counterpart of [`put`].
+fn get<'a>(nbt: &'a Compound, name: &str) -> Option<&'a Tag> {
+    if let Tag::String(key) = key_tag(name) {
+        nbt.get(&key)
+    } else {
+        None
+    }
+}
+
+/// The saved values a generator's item carries: exactly what [`read_generator`] reads back.
+const GENERATOR_STATE_KEYS: [&str; 3] = ["energy", "burn", "burn_max"];
+/// The saved values a crusher's item carries: exactly what [`read_crusher`] reads back.
+const CRUSHER_STATE_KEYS: [&str; 2] = ["energy", "progress"];
+
+/// The machines' own items, resolved once at registration. `block_drops` runs with a read-only
+/// [`LevelHost`], which cannot name an item, so the drop is matched against the key registration
+/// already resolved — and only a machine's own drop may take its state.
+static GENERATOR_ITEM: OnceLock<ItemKey> = OnceLock::new();
+static CRUSHER_ITEM: OnceLock<ItemKey> = OnceLock::new();
+
+/// The item key of the machine `block` names, once registration has resolved it.
+fn machine_item(block: &str) -> Option<ItemKey> {
+    match block {
+        GENERATOR => GENERATOR_ITEM.get().copied(),
+        CRUSHER => CRUSHER_ITEM.get().copied(),
+        _ => None,
+    }
+}
+
 /// `saved` tagged as `type_id`'s data, under the vanilla component's name: the patch a broken
 /// machine's drop carries.
-fn entity_data_patch(saved: &Compound, type_id: &str) -> Compound {
-    let mut payload = saved.clone();
+///
+/// Only `keys` travel — the values this port reads back ([`GENERATOR_STATE_KEYS`],
+/// [`CRUSHER_STATE_KEYS`]) plus the `id` that names the block entity type. Everything else the
+/// block entity saved stays behind, above all vanilla's `Items`: the engine spills a container's
+/// stacks itself, so a payload that repeated them would drop every stack twice and load them back
+/// into the placed machine (HANDOVER §9m).
+fn entity_data_patch(saved: &Compound, type_id: &str, keys: &[&str]) -> Compound {
+    let mut payload = Compound::new();
+    for key in keys {
+        if let Some(value) = get(saved, key) {
+            put(&mut payload, key, value.clone());
+        }
+    }
     put(&mut payload, "id", Tag::String(type_id.into()));
     let mut patch = Compound::new();
     put(&mut patch, BLOCK_ENTITY_DATA, Tag::Compound(payload));
@@ -736,11 +779,14 @@ pub(crate) fn on_block_drops(level: &dyn LevelHost, event: &mut BlockDropsEvent<
     let Some(block) = level.state_block(event.state) else {
         return Flow::Continue;
     };
-    let Some(type_id) = (match block {
-        GENERATOR => Some(GENERATOR_TYPE_ID),
-        CRUSHER => Some(CRUSHER_TYPE_ID),
+    let Some((type_id, keys)) = (match block {
+        GENERATOR => Some((GENERATOR_TYPE_ID, GENERATOR_STATE_KEYS.as_slice())),
+        CRUSHER => Some((CRUSHER_TYPE_ID, CRUSHER_STATE_KEYS.as_slice())),
         _ => None,
     }) else {
+        return Flow::Continue;
+    };
+    let Some(item) = machine_item(block) else {
         return Flow::Continue;
     };
     let Some(entity) = event.block_entity else {
@@ -749,10 +795,13 @@ pub(crate) fn on_block_drops(level: &dyn LevelHost, event: &mut BlockDropsEvent<
     let Some(saved) = level.block_entity_data(entity) else {
         return Flow::Continue;
     };
-    let patch = entity_data_patch(&saved, type_id);
-    // A machine's loot is the machine itself, so its state goes on every drop the table made.
+    let patch = entity_data_patch(&saved, type_id, keys);
+    // Only the machine's own drop takes the state. A machine's loot is the machine itself, but a
+    // table that ever drops a second entry must not hand it this machine's FE.
     for drop in event.drops.iter_mut() {
-        let _ = drop.stack.apply_components(&patch);
+        if drop.stack.item() == item {
+            let _ = drop.stack.apply_components(&patch);
+        }
     }
     Flow::Continue
 }
@@ -1237,7 +1286,11 @@ mod tests {
         let Tag::Compound(saved) = saved else {
             panic!("write_generator keeps the compound");
         };
-        let patch = Tag::Compound(entity_data_patch(&saved, GENERATOR_TYPE_ID));
+        let patch = Tag::Compound(entity_data_patch(
+            &saved,
+            GENERATOR_TYPE_ID,
+            &GENERATOR_STATE_KEYS,
+        ));
         let Some(payload) = patch.get(BLOCK_ENTITY_DATA) else {
             panic!("the patch names the vanilla component");
         };
@@ -1266,10 +1319,111 @@ mod tests {
         let Tag::Compound(crusher) = crusher else {
             panic!()
         };
-        let patch = Tag::Compound(entity_data_patch(&crusher, CRUSHER_TYPE_ID));
+        let patch = Tag::Compound(entity_data_patch(
+            &crusher,
+            CRUSHER_TYPE_ID,
+            &CRUSHER_STATE_KEYS,
+        ));
         assert_eq!(
             patch.get(BLOCK_ENTITY_DATA).and_then(|p| p.get("id")),
             Some(&Tag::String(CRUSHER_TYPE_ID.into()))
+        );
+    }
+
+    #[test]
+    fn a_broken_machines_payload_carries_its_state_and_never_its_stacks() {
+        // The engine spills a container's stacks by itself, so a payload that repeated them
+        // would put every stack in the world twice and load them back into the placed machine
+        // (HANDOVER §9m). The carrier is an allowlist of the values this port reads back, not
+        // the block entity's saved compound.
+        let mut saved = compound();
+        write_crusher(
+            &mut saved,
+            &Crusher {
+                energy: 3_600,
+                progress: 9,
+            },
+        );
+        let Tag::Compound(nbt) = &mut saved else {
+            panic!("the saved data is a compound");
+        };
+        put(
+            nbt,
+            "Items",
+            Tag::List(vec![Tag::compound([
+                ("id", Tag::String("minecraft:coal_ore".into())),
+                ("count", Tag::Byte(1)),
+            ])]),
+        );
+        put(nbt, "later_key", Tag::Int(7));
+
+        let patch = Tag::Compound(entity_data_patch(nbt, CRUSHER_TYPE_ID, &CRUSHER_STATE_KEYS));
+        let Some(payload) = patch.get(BLOCK_ENTITY_DATA) else {
+            panic!("the patch names the vanilla component");
+        };
+        assert_eq!(
+            payload.get("energy"),
+            Some(&Tag::Int(3_600)),
+            "the crusher's FE travels"
+        );
+        assert_eq!(
+            payload.get("progress"),
+            Some(&Tag::Int(9)),
+            "the crusher's progress travels"
+        );
+        assert_eq!(
+            payload.get("Items"),
+            None,
+            "the container's stacks are the engine's to spill, never the payload's"
+        );
+        assert_eq!(
+            payload.get("later_key"),
+            None,
+            "a key this port does not read back does not travel either"
+        );
+        assert_eq!(
+            read_crusher(payload),
+            Crusher {
+                energy: 3_600,
+                progress: 9
+            },
+            "the allowlist still reads back as the machine it came from"
+        );
+
+        // The generator's own allowlist: its burn keys, and never a crusher's `progress`.
+        let mut generator = compound();
+        write_generator(
+            &mut generator,
+            &Generator {
+                energy: 1_940,
+                burn: 1_503,
+                burn_max: 1_600,
+            },
+        );
+        let Tag::Compound(nbt) = &mut generator else {
+            panic!("the saved data is a compound");
+        };
+        put(nbt, "progress", Tag::Int(42));
+        let patch = Tag::Compound(entity_data_patch(
+            nbt,
+            GENERATOR_TYPE_ID,
+            &GENERATOR_STATE_KEYS,
+        ));
+        let Some(payload) = patch.get(BLOCK_ENTITY_DATA) else {
+            panic!("the patch names the vanilla component");
+        };
+        assert_eq!(
+            read_generator(payload),
+            Generator {
+                energy: 1_940,
+                burn: 1_503,
+                burn_max: 1_600
+            }
+        );
+        assert_eq!(
+            payload.get("progress"),
+            None,
+            "a key of the other machine's state does not travel"
         );
     }
 

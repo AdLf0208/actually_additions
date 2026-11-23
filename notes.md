@@ -729,7 +729,7 @@ Harness facts measured while getting there:
 | generator→crusher FE move at `level_tick_post` | tested (adjacent pair, slice 1) |
 | `/actuallyadditions info` (parsed reply, level-2 gate) | **tested** — owner reads the line, a level-0 LAN guest is refused after `/help` and `/list` answer the same guest |
 | break carries a machine's saved state (generator) | **tested** — break → drop → pick up → place → `info` keeps FE and burn, fresh machine at 0 |
-| break carries a machine's saved state (crusher) | **not ported/tested in game** — the crusher shares the hook and type ids (unit test pins its payload) but the leg breaks the generator only; a crusher phase is the next slice's first step |
+| break carries a machine's saved state (crusher, loaded) | **tested (0.2.3)** — a survival break of a crusher with 7,300 FE, progress 36 and a coal ore inside drops an item whose `Item` tag is `{energy: 5180, progress: 89, id: …}` with **no `Items`**; the ore spills as its own plain drop; placing it again reads 5,180 FE with an empty container; an empty crusher's payload is only `{id}` and comes back at 0 — `SELFTEST=drops` flips it to `EXIT:1` |
 | clamp on placement (corrupt `burn`, `progress`, buffer) | unit-tested (`restored_generator`, `restored_crusher`); not reachable from `ctl` |
 | GUI / menu / screen | **blocked(no-single-player-mod-screen)** — see above, code reverted |
 | machine recipes | **not crafting** — carried, and the load log now names why: `recipes: invalid ingredient (unresolved tag or malformed input): "#c:cobblestones"` plus the missing `iron_casing`/`basic_coil`/`restonia_crystal` (the crafting-chain gap; next but one) |
@@ -741,11 +741,158 @@ Everything in the 0.1.0/0.2.0 lists still stands except item 3 of the slice-1 de
 
 1. **No GUI** — now `blocked(no-single-player-mod-screen)` rather than "deferred": the pin cannot
    show a content menu's slots on the single-player host, so the right-click insert stays.
-2. **The crusher's own break/place leg** is unit-tested only (see the coverage table).
+2. **The crusher's own break/place leg** was unit-tested only after slice 2; **closed by the
+   review fix below (0.2.3)**: the leg now breaks a loaded crusher in game and asserts its payload,
+   its spill and its restore.
 3. **The two machine recipes still do not craft**, and the load log names the unresolved
    `#c:cobblestones`. The crafting chain (`iron_casing`, `basic_coil`, `restonia_crystal`,
    `black_quartz`) is the next family; `black_quartz` needs the ore, which is worldgen.
-4. `minecraft:block_entity_data` carries the **whole** saved compound, including any future keys;
-   the clamp covers the three values this slice writes, and a later key needs its own clamp.
+4. `minecraft:block_entity_data` carried the **whole** saved compound in 0.2.2, including any
+   future keys — **closed by the review fix below (0.2.3)**: the payload is an allowlist of the
+   values the port reads back, so a later key cannot ride along unnoticed.
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port
+
+## Review fixes (2026-11-22/23) — `horizon-mods#1557` round 1 (`NikitaMGrimm`) → 0.2.3
+
+**Package 0.2.3**, `actuallyadditions.hmod` **105,538 B**, sha256
+`e0b1f95ad260a2a8fc81ab0906cf902a42a11a07db3aae3161b8b21a88369600`, **91 entries** (0.2.2: 90, the
+lock is the new one). Three items, each answered with what changed and where.
+
+### 1. BLOCKER — the drop hook duplicated the container's inventory (`src/support.rs`)
+
+Quoted: *the drop hook duplicates inventory … `let mut payload = saved.clone()` … the crusher's
+saved `Items` ride on the dropped item, on top of what the engine already spills.* That was true:
+`event.block_entity` is the **pre-removal** snapshot (`HANDOVER.md` §9m), so the payload carried
+`Items` on every drop the loot table made.
+
+**Red first** (`evidence/actuallyadditions/sdk-test-red-payload.log`; the function was given its
+`keys` parameter with the old body so the failure is the assertion, not a compile error):
+
+```
+---- support::tests::a_broken_machines_payload_carries_its_state_and_never_its_stacks stdout ----
+
+thread 'support::tests::a_broken_machines_payload_carries_its_state_and_never_its_stacks' (6175) panicked at src/support.rs:1322:9:
+assertion `left == right` failed: the container's stacks are the engine's to spill, never the payload's
+  left: Some(List([Compound({JavaString([99, 111, 117, 110, 116]): Byte(1), JavaString([105, 100]): String(JavaString([109, 105, 110, 101, 99, 114, 97, 102, 116, 58, 99, 111, 97, 108, 95, 111, 114, 101]))})]))
+ right: None
+test result: FAILED. 30 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+**What changed.** `entity_data_patch(saved, type_id, keys)` no longer clones the compound: it
+copies **only** the allowlist (`GENERATOR_STATE_KEYS = ["energy", "burn", "burn_max"]`,
+`CRUSHER_STATE_KEYS = ["energy", "progress"]` — exactly what `read_generator`/`read_crusher` read
+back) plus the `id`, and nothing else can travel. `on_block_drops` resolves the machine's own
+`ItemKey` **once at registration** (`GENERATOR_ITEM`/`CRUSHER_ITEM` `OnceLock`s — `block_drops`
+gets a read-only `LevelHost`, which cannot name an item) and applies the patch **only** to the
+drop whose `stack.item()` is that key, not to every drop the table made. Green: **31 passed**.
+
+**In game** (`evidence/actuallyadditions-e2e/e2e-launcher.log`), a loaded crusher broken in
+survival:
+
+```
+  before breaking the loaded crusher: Crusher at 12,100,5: 7300/60000 FE (comparator 1, progress 36/100, input minecraft:coal_ore x1, …)
+  items near the break: [{"item":"actuallyadditions:crusher","count":1}, {"item":"minecraft:coal_ore","count":1}]
+  the crusher drop's Item tag: {"chat":["Crusher has the following entity data: {components: {\"minecraft:block_entity_data\": {progress: 89, id: \"actuallyadditions:crusher_block_entity\", energy: 5180}}, count: 1, id: \"actuallyadditions:crusher\"}"],"ok":true}
+  payload: energy 5180 (machine 7300), progress 89 (machine 36)
+  the drop carries energy and progress and no Items
+  the spilled input's Item tag: {"chat":["Coal Ore has the following entity data: {count: 1, id: \"minecraft:coal_ore\"}"],"ok":true}
+  held after the walk: actuallyadditions:crusher
+  after placing it again: Crusher at 14,100,5: 5180/60000 FE (comparator 1, progress 0/100, input empty, out0 empty, out1 empty, …)
+  crusher FE 7300 -> 5180
+  the placed crusher kept its FE and came back with an empty container
+  a harness-given crusher: Crusher at 16,100,5: 0/60000 FE (comparator 0, progress 0/100, …)
+  items near the empty break: ["actuallyadditions:crusher"]
+  the empty crusher's Item tag: {"chat":["Crusher has the following entity data: {components: {\"minecraft:block_entity_data\": {id: \"actuallyadditions:crusher_block_entity\"}}, count: 1, id: \"actuallyadditions:crusher\"}"],"ok":true}
+  the empty crusher placed again: Crusher at 18,100,5: 0/60000 FE (comparator 0, progress 0/100, input empty, …)
+```
+
+The payload's numbers are the machine's own **at the moment of the break** (the machine keeps
+ticking while the pickaxe swings: 36 → 89), which is why the assertion is "the charged machine's
+own" plus the empty-machine differential rather than an equality against the earlier read. Two
+further facts the leg measured:
+
+- `data get entity @e[type=minecraft:item,…] Item` **does** show `minecraft:block_entity_data`
+  (unlike `ctl entities`, whose `encode_components` omits it, the slice-2 trap), so the carrier is
+  asserted directly. The nbt-filtered selector was flaky in one run; the leg now clears item
+  entities and reads the nearest one (`distance=..8`).
+- An **idle** machine answers `BlockEntityTickReply::Unchanged`, so its saved compound holds **no**
+  `energy`/`progress` keys at all: an empty machine's payload is `{id}` only, and both values read
+  back as 0. That is what the differential asserts (no non-zero state), not a literal `energy: 0`.
+
+**Fail-capability.** `SELFTEST=drops` flips the payload assertion ("the container's `Items`
+travel"), which passes only on the defect:
+`FAIL: SELFTEST drops: the payload carries no Items (the fixed behaviour); …` + `EXIT:1`
+(`e2e-launcher-selftest-drops.log`).
+
+### 2. The registry `Cargo.lock` now ships
+
+The crate declares `serde_json = "=1.0.151"`, so the package must pack its lock
+(`verify-sdk-package.py` refuses an unlocked package that declares a registry dependency; the
+launcher's clean build needs it). The 0.2.2 build removed the lock before building — that is why
+it was absent. 0.2.3 keeps the tree's lock (`sha256 4938025f0ffa737da852043f35a5b7a190fe071f0719af4f597279c7d06e35fd`,
+8,850 B) and the pass packs it: the archive is **91 entries instead of 90**, `Cargo.lock` is the
+91st, and its bytes in the package equal the tree's. The 0.2.0 migration trap 2 ("`cargo
+horizon-mod build` packs no `Cargo.lock`") is superseded: it packs it **when it is present**, and
+it should be present.
+
+### 3. The upstream MIT notice is verbatim
+
+`LICENSE` is now the upstream file byte for byte — 1,063 B, sha256
+`82ea451b20be461c2bbf279262d4a28c34bed3edc3197b90ae902b77fb22c560`, including
+`Copyright (c) 2019 Mrbysco`, from
+<https://github.com/Ellpeck/ActuallyAdditions/blob/v1.3.26/LICENSE>. Our provenance (the jar's
+SHA-1, the "clean-room Rust" statement) and our own copyright moved to `LICENSE-NOTICE.md`,
+separate from the notice; `tools/stamp_license.py` re-stamped
+`data/actuallyadditions/license/{license.txt,notice.txt}`, and `license.txt`'s hash equals the
+upstream file's. The previous `LICENSE` had rewritten the copyright lines and named the wrong
+project.
+
+### Ladder (0.2.3, slot `W2-actuallyadditions`, `CARGO_INCREMENTAL=0`)
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **31 passed**, 0 failed (`Compiling actuallyadditions v0.2.3`, not a cached artefact) — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --manifest-path … --check` | exit 0 — `sdk-fmt.log` |
+| package ×2 | `cargo horizon-mod build`, twice, **lock kept** | **105,538 B** both, `cmp` identical — `sdk-build.log`, `sdk-build-second.log` |
+| registry check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.3 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 105,538 bytes, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` | **1/1** (includes `packed Cargo.lock (declares a dependency) 91 entries`) |
+| in-game | `tools/e2e.sh` on the launcher-built game | `PASS` + `EXIT:0` — `actuallyadditions-e2e/e2e-launcher.log` |
+| counterfactual | `SELFTEST=drops` | `FAIL: SELFTEST drops: the payload carries no Items …` + `EXIT:1` |
+| counterfactual | `SELFTEST=1` | `FAIL: SELFTEST flipped: the placed machine kept 2820 FE, not 0` + `EXIT:1` |
+| control | the same script on the same Nightly **without** the package | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=4 ok=4` |
+
+The launcher build is `native-0a875da-…` and the leg's first line names the sha256 above, so the
+game ran the delivered archive.
+
+## Next slice (0.2.4)
+
+**Family:** the crafting chain's first two pieces — `actuallyadditions:iron_casing` and
+`actuallyadditions:basic_coil` — plus the missing `c:cobblestones` **item tag**, so the **Coal
+Generator's own recipe crafts in game** (its 9 cells need only casings, coal and cobblestone; the
+Crusher's need `restonia_crystal`, which upstream grows rather than crafts).
+
+- **Gap line** (`Gaps after slice 2`, item 3): *"The two machine recipes still do not craft, and
+  the load log names the unresolved `#c:cobblestones`. The crafting chain (`iron_casing`,
+  `basic_coil`, `restonia_crystal`, `black_quartz`) is the next family; `black_quartz` needs the
+  ore, which is worldgen."*
+- **Why it fits `machines`:** it is carried content (two item models + two shaped recipes + one
+  tag) on a machines-tier port, proven through the machine the port already ships — no GUI, no
+  new hook, no renderer. The recipe is dead data today: `recipe/crusher.json` and
+  `recipe/coal_generator.json` ship with keys that resolve to nothing.
+- **In-game assertion that can fail:** `ctl command "recipe give @s actuallyadditions:coal_generator"`
+  → `Unlocked 1 recipe(s)`; place a crafting table, fill `CIC/CAC/CIC` with four
+  `minecraft:cobblestone`, two `actuallyadditions:iron_casing` and one `minecraft:coal`, take the
+  result, and assert `actuallyadditions:coal_generator ×1` in the inventory **and** that the seven
+  ingredients were consumed (`ctl inventory` before/after + `ctl menu`). Differential: the same
+  grid with iron ingots where the casings go yields nothing. Counterfactual `NEGATIVE=1`: the
+  recipe is **not** unlocked when the `c:cobblestones` tag is absent, which is today's state.
+- **Out of scope, and said so:** `restonia_crystal` (upstream grows a seed in water — a mechanic,
+  not a recipe) keeps the Crusher's recipe `blocked(restonia_crystal_growth)`; `black_quartz`
+  needs the ore, i.e. worldgen, which is last in the queue.
+
+Skills: superpowers/receiving-code-review,systematic-debugging,test-driven-development,verification-before-completion; BeautifulRust/rust-best-practices

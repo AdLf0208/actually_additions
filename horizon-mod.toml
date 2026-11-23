@@ -2,15 +2,16 @@
 # Cargo's package name and version are not the mod's.
 id = "actuallyadditions"
 name = "Actually Additions"
-version = "0.2.2"
+version = "0.2.3"
 description = """A port of Actually Additions 1.3.26 for Horizon, slice 1: the Coal Generator and the Crusher.
 The generator turns any fuel the game's fuel table knows into 20 FE a tick, up to a 60,000 FE buffer that
 takes no inserts and gives 80 FE a call, and a fuelled generator pushes its FE to the crushers beside it.
 The crusher spends 40 FE a tick and turns one input into its recipe's results in 100 ticks, reading the
 jar's own `actuallyadditions:crushing` files, with the second result rolled at its chance. Both buffers
-are real block energy capabilities another mod's cable can read. Not yet ported: the GUI, the Double
-Crusher and the other machines, redstone control, energy relays, the crafting chain, worldgen and the
-booklet."""
+are real block energy capabilities another mod's cable can read. A broken machine keeps its FE,
+burn and progress on its own item (and never its inventory, which spills as vanilla does). Not yet
+ported: the GUI, the Double Crusher and the other machines, redstone control, energy relays, the
+crafting chain, worldgen and the booklet."""
 authors = ["Ellpeck", "AdLf0208"]
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
 # beside the carried assets/ and data/.
