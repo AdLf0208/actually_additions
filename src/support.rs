@@ -11,12 +11,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use mod_api::{
-    self, BlockClick, BlockDropsEvent, BlockEntityEvent, BlockEntityPart, BlockEntityTickEvent,
-    BlockEntityTickReply, BlockEntityTicksEvent, BlockPart, Command, CommandArgumentValue,
-    Compound, ENERGY, Flow, Host, HostTransaction, Identifier, Ingredient, InteractionResult,
-    ItemKey, ItemPart, ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LevelSide,
-    ModContainer, ModEnergyBuffer, OnBlockPlacedByEvent, RandomSource, Registrar,
-    RegistrationContext, RunModCommandEvent, ServerHost, Tag, Text, move_energy,
+    self, BiomeModifier, BiomeModifierOperation, BlockClick, BlockDropsEvent, BlockEntityEvent,
+    BlockEntityPart, BlockEntityTickEvent, BlockEntityTickReply, BlockEntityTicksEvent, BlockPart,
+    Command, CommandArgumentValue, Compound, ENERGY, Flow, Host, HostTransaction, Identifier,
+    Ingredient, InteractionResult, ItemKey, ItemPart, ItemPlace, ItemResource, ItemStack,
+    LevelHost, LevelRef, LevelSide, ModContainer, ModEnergyBuffer, OnBlockPlacedByEvent,
+    RandomSource, Registrar, RegistrationContext, RunModCommandEvent, ServerHost, Tag, Text,
+    move_energy,
 };
 
 use crate::runtime::{
@@ -99,6 +100,27 @@ pub(crate) fn declare(r: &mut dyn Registrar, context: &RegistrationContext) {
     }
     if let Err(error) = r.block_entity_part(&crusher_kind, CrusherPart) {
         context.refuse(&error.to_string());
+    }
+    // The Black Quartz Ore's generation (0.2.5). The carried `worldgen/configured_feature` and
+    // `placed_feature` are pure vanilla JSON; what attaches them to the Overworld is a biome
+    // modifier, and 1.3.26's own file names `actuallyadditions:bool_config_feature_modifier`, a
+    // type the pin does not read — shipped as data it would be skipped and the ore would never
+    // generate. Declaring the same `add_features` operation here is the platform's route; the
+    // `generateQuartz` flag it replaces has no equivalent, so the ore always generates.
+    let generation = crate::runtime::black_quartz_ore_generation();
+    let modifier = BiomeModifier {
+        biomes: generation
+            .biomes
+            .iter()
+            .map(|biome| (*biome).to_owned())
+            .collect(),
+        operation: BiomeModifierOperation::AddFeatures {
+            features: vec![generation.feature.to_owned()],
+            step: generation.step.to_owned(),
+        },
+    };
+    if let Err(error) = r.declare_biome_modifier(generation.id, modifier) {
+        context.refuse(&format!("biome modifier {}: {error:?}", generation.id));
     }
 }
 

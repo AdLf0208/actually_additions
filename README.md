@@ -1,13 +1,13 @@
-# Actually Additions → Horizon (slices 1–3)
+# Actually Additions → Horizon (slices 1–4)
 
 The **Coal Generator** and the **Crusher** of Actually Additions 1.3.26
-(`Ellpeck/ActuallyAdditions`, **MIT**) as one flat SDK package (mod API `0.2`, version `0.2.4`),
+(`Ellpeck/ActuallyAdditions`, **MIT**) as one flat SDK package (mod API `0.2`, version `0.2.5`),
 built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` and mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` for Minecraft 26.3.
 
 - [`FINDINGS.md`](FINDINGS.md) — upstream behaviour read from the source, the slice boundary and
   the mod's remaining machine list.
-- [`notes.md`](notes.md) — scope, the retired-hook → SDK mapping, slices 2 and 3, verification,
+- [`notes.md`](notes.md) — scope, the retired-hook → SDK mapping, slices 2–4, verification,
   deviations, gaps and every migration/verification trap.
 - [`VALIDATION.md`](VALIDATION.md) — the ladder and the in-game evidence for each version.
 - `horizon-mod.toml` — the one manifest and identity (`capabilities = ["registries"]`, `[native]`
@@ -34,17 +34,20 @@ built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`
 | Interaction | a container GUI | a right click inserts fuel/a recipe input; a `/actuallyadditions info <pos>` readout for the harness |
 | Break a machine | loot copies the `energy` component | the saved compound rides `minecraft:block_entity_data` (an allowlist: FE, burn, progress; never the inventory) and is clamped on placement |
 | Craft a machine | `actuallyadditions:iron_casing` + `basic_coil` + `c:cobblestones` | the same: the Iron Casing block, the Basic Coil item and the `c:cobblestones` tag ship, and the Coal Generator's recipe crafts in a vanilla table |
+| Black Quartz | an ore (worldgen) smelted/blasted/crushed into the gem | the ore block, the gem, the loot table (silk touch → the ore) and all three recipes ship; the ore does **not generate** at this pin (`blocked(configured-feature-not-registered)`, a platform gap the e2e asserts) |
+| Iron Casing | `WSW / SQS / WSW` from `#c:ingots/iron`, `#c:rods/wooden`, black quartz | the recipe and both convention tags ship and craft |
 
 Not ported, and recorded as gaps in [`notes.md`](notes.md): the GUI
 (`blocked(no-single-player-mod-screen)`), the Double Crusher and the other ~45 machines, redstone
 control, relays/cables, the rest of the crafting chain (the Crusher's recipe waits on
-`restonia_crystal`, `blocked(restonia_crystal_growth)`), worldgen, the booklet,
-`lit`/comparator/particles.
+`restonia_crystal`, which the Atomic Reconstructor's laser makes — `blocked(restonia_crystal_source)`),
+the ore's generation (`blocked(configured-feature-not-registered)`: a content package's configured
+features do not reach the feature registry at this pin), the booklet, `lit`/comparator/particles.
 
 ## Quick checks
 
 ```sh
-cargo test --offline                                       # 31 tests: 17 runtime, 14 glue
+cargo test --offline                                       # 34 tests: 20 runtime, 14 glue
 cargo clippy --all-targets --offline -- -D warnings         # 0 warnings
 cargo fmt --check                                          # not --all: that checks the fetched SDK
 cargo horizon-mod build                                    # keep Cargo.lock in the tree (declares serde_json)
@@ -54,7 +57,7 @@ cargo horizon-mod fits actuallyadditions.hmod --build 0b14f8a   # a different bu
 python3 tools/check_recipe_keys.py                          # every recipe key resolves, or is a recorded blocker
 ports/tools/launcher-game.sh build actuallyadditions        # the launcher compiles the package into a game
 eval "$(ports/tools/launcher-game.sh env actuallyadditions)" && tools/e2e.sh
-                                                            # SELFTEST=1, SELFTEST=drops and NEGATIVE=1 must fail
+                                                            # SELFTEST=1, SELFTEST=drops, SELFTEST=ore and NEGATIVE=1 must fail
 ```
 
 Local-only until the maintainer approves publishing (ARCHITECTURE.md §8); the artifact goes to a

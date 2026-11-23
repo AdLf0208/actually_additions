@@ -51,6 +51,17 @@ BLOCKS = ("coal_generator", "crusher")
 # recipe, which could not resolve before they existed.
 CASING = "iron_casing"
 ITEMS = ("basic_coil",)
+# Slice 4 (0.2.5): the Black Quartz Ore and the gem it drops. The ore is a block
+# (`ActuallyBlocks.BLACK_QUARTZ_ORE`: `Blocks.STONE` copied, `strength(1.5f, 10f)`, so the
+# same numbers as the machines); the gem is a plain item. The ore is worldgen: its
+# configured/placed features and the biome modifier that attaches them are carried below.
+ORE = "black_quartz_ore"
+GEM = "black_quartz"
+# NeoForge's convention item tags the Iron Casing's recipe keys on (`#c:ingots/iron`,
+# `#c:rods/wooden`). 26.3 ships no `c:` namespace, so the port declares the two tags; the
+# members are NeoForge 1.21.x's generated lists (iron has one member, wooden rods the stick).
+IRON_INGOT_TAG = ("minecraft:iron_ingot",)
+WOODEN_ROD_TAG = ("minecraft:stick",)
 # `c:cobblestones` is a NeoForge convention tag, not a jar file: 26.3 ships no
 # `c:` namespace, so the port declares the tag the mod's own recipes use. The
 # four members are NeoForge 1.21.x's generated list (the same values the
@@ -235,8 +246,16 @@ def main() -> None:
     # Every block the tag names must exist; a subset keeps the tag honest.
     write(
         OUT / "data/minecraft/tags/block/mineable/pickaxe.json",
-        json.dumps({"values": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING,)]}, indent=2)
+        json.dumps(
+            {"values": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)]}, indent=2
+        )
         + "\n",
+    )
+    # Upstream puts the ore in `minecraft:needs_stone_tool` (BlockTagsGenerator): a wooden
+    # pickaxe does not drop it.
+    write(
+        OUT / "data/minecraft/tags/block/needs_stone_tool.json",
+        json.dumps({"values": [f"actuallyadditions:{ORE}"]}, indent=2) + "\n",
     )
 
     # The item tag the mod's own recipes key on (`#c:cobblestones` in
@@ -245,6 +264,130 @@ def main() -> None:
     write(
         OUT / "data/c/tags/item/cobblestones.json",
         json.dumps({"values": list(COBBLESTONE_TAG)}, indent=2) + "\n",
+    )
+    # The Iron Casing's recipe keys on these two; a missing tag drops the recipe at load.
+    write(
+        OUT / "data/c/tags/item/ingots/iron.json",
+        json.dumps({"values": list(IRON_INGOT_TAG)}, indent=2) + "\n",
+    )
+    write(
+        OUT / "data/c/tags/item/rods/wooden.json",
+        json.dumps({"values": list(WOODEN_ROD_TAG)}, indent=2) + "\n",
+    )
+
+    # The Black Quartz Ore, the Black Quartz gem and their worldgen (slice 4, 0.2.5).
+    for source in ("blockstates", "items"):
+        copy(
+            CARRY / f"assets/actuallyadditions/{source}/{ORE}.json",
+            assets / f"{source}/{ORE}.json",
+        )
+    copy(
+        CARRY / f"assets/actuallyadditions/models/block/{ORE}.json",
+        assets / f"models/block/{ORE}.json",
+    )
+    for model in (f"models/item/{ORE}.json", f"models/item/{GEM}.json"):
+        copy(CARRY / f"assets/actuallyadditions/{model}", assets / model)
+    copy(
+        CARRY / f"assets/actuallyadditions/items/{GEM}.json",
+        assets / f"items/{GEM}.json",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/textures/block/{ORE}.png",
+        assets / f"textures/block/{ORE}.png",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/textures/item/{GEM}.png",
+        assets / f"textures/item/{GEM}.png",
+    )
+    # `ActuallyBlocks.miscBlockProperties()`: `Blocks.STONE` copied, `strength(1.5f, 10f)`,
+    # so stone's sound and a tool requirement, and the item is the block's own.
+    write(
+        data / f"horizon/block/{ORE}.json",
+        json.dumps(
+            {
+                "template": "minecraft:stone",
+                "properties": {
+                    "hardness": 1.5,
+                    "explosion_resistance": 10.0,
+                    "requires_tool": True,
+                },
+                "item": True,
+            },
+            indent=2,
+        )
+        + "\n",
+    )
+    write(data / f"horizon/item/{GEM}.json", json.dumps({"template": "minecraft:stick"}, indent=2) + "\n")
+    # The jar's loot table, already upgraded by the port pack to 26.3's shape: silk touch
+    # drops the ore itself, otherwise one Black Quartz with fortune's `ore_drops` bonus and
+    # explosion decay. This is the one carried table that is *not* the machine's shape.
+    copy(
+        CARRY / f"data/actuallyadditions/loot_table/blocks/{ORE}.json",
+        data / f"loot_table/blocks/{ORE}.json",
+    )
+    # The ore's own recipes: a furnace, a blast furnace, and the crusher's (already carried
+    # with the other 48 `crushing/*` files) all produce the gem.
+    for recipe in ("black_quartz_ore_smelting", "black_quartz_ore_blasting", "iron_casing"):
+        copy(
+            CARRY / f"data/actuallyadditions/recipe/{recipe}.json",
+            data / f"recipe/{recipe}.json",
+        )
+    # The convention tags a `c:ores` consumer reads, and the gem tag the quartz family
+    # shares. Only ids this package declares are named: the storage block is another slice,
+    # so `c:storage_blocks/black_quartz` is not carried (its lone member does not exist here).
+    write(
+        OUT / "data/c/tags/block/ores/black_quartz.json",
+        json.dumps({"values": [f"actuallyadditions:{ORE}"]}, indent=2) + "\n",
+    )
+    write(
+        OUT / "data/c/tags/block/ores.json",
+        json.dumps({"values": ["#c:ores/black_quartz"]}, indent=2) + "\n",
+    )
+    write(
+        OUT / "data/c/tags/block/ores_in_ground/stone.json",
+        json.dumps({"values": [f"actuallyadditions:{ORE}"]}, indent=2) + "\n",
+    )
+    write(
+        OUT / "data/c/tags/item/ores/black_quartz.json",
+        json.dumps({"values": [f"actuallyadditions:{ORE}"]}, indent=2) + "\n",
+    )
+    write(
+        OUT / "data/c/tags/item/ores.json",
+        json.dumps({"values": ["#c:ores/black_quartz"]}, indent=2) + "\n",
+    )
+    write(
+        OUT / "data/c/tags/item/ores_in_ground/stone.json",
+        json.dumps({"values": [f"actuallyadditions:{ORE}"]}, indent=2) + "\n",
+    )
+    write(
+        OUT / "data/c/tags/item/gems/black_quartz.json",
+        json.dumps({"values": [f"actuallyadditions:{GEM}"]}, indent=2) + "\n",
+    )
+    # The worldgen: pure vanilla JSON (`minecraft:ore` + count/in_square/height_range/biome).
+    # What attaches it to the Overworld is a biome modifier. Upstream's own
+    # `neoforge/biome_modifier/add_black_quartz.json` names
+    # `actuallyadditions:bool_config_feature_modifier`, a type the pin does not read (it would be
+    # skipped), so the file is written with the platform's `neoforge:add_features` type instead —
+    # the same addition, the `generateQuartz` flag dropped. `Mod::register` also declares it
+    # through the SDK's `declare_biome_modifier`; at this pin the data file is the one the content
+    # root reads (measured: the code declaration never reaches `biome-modifiers.json`).
+    for feature in ("configured_feature", "placed_feature"):
+        copy(
+            CARRY / f"data/actuallyadditions/worldgen/{feature}/ore_black_quartz.json",
+            data / f"worldgen/{feature}/ore_black_quartz.json",
+        )
+    write(
+        OUT / "data/actuallyadditions/neoforge/biome_modifier/add_black_quartz.json",
+        json.dumps(
+            {
+                "type": "neoforge:add_features",
+                "biomes": "#minecraft:is_overworld",
+                "features": f"actuallyadditions:ore_black_quartz",
+                "step": "underground_ores",
+            },
+            indent=2,
+        )
+        + "\n",
     )
 
     # Upstream's creative tab is code; one tab for the slice, with the two
@@ -255,7 +398,7 @@ def main() -> None:
             {
                 "title": "itemGroup.actuallyadditions.machines",
                 "icon": "actuallyadditions:coal_generator",
-                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING,) + ITEMS],
+                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)] + [f"actuallyadditions:{GEM}"] + [f"actuallyadditions:{i}" for i in ITEMS],
             },
             indent=2,
         )

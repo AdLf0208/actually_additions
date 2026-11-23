@@ -1071,7 +1071,7 @@ Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-de
 > an item or tag the package cannot resolve; the e2e runs `--offscreen` and gains the crafting and
 > block legs. 103 entries, 110,156 B, sha256 `f7767eba…dd1d67`.
 
-## Next slice (0.2.5)
+## Next slice after 0.2.4 (the list the 0.2.5 investigation came from)
 
 **Family:** the rest of the crafting chain that is *craftable* — the `c:ingots/iron` and
 `c:rods/wooden` item tags, wherever they are needed — starting with **`black_quartz`**, which gates
@@ -1095,5 +1095,379 @@ recipes can ship and be crafted.
   with `c:rods/wooden` + `c:ingots/iron` (which this slice must then declare).
 - **Out of scope:** the remaining chain (`empowered_*` crystals, the Empowerer), the Double
   Crusher, the GUI (`blocked(no-single-player-mod-screen)`).
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+## 0.2.5 investigation #1 (2026-11-23) — the water-growth premise is not in the artefact; **that** slice was blocked
+
+> **What happened next:** the version number 0.2.5 was not spent on that dispatch (nothing artefact-true was
+> left to ship). The next dispatch was the **Black Quartz Ore** — the slice the investigation's own
+> "next slice, in artefact order" list ranked first — and it is what 0.2.5 is; see "Slice 4 (0.2.5)"
+> at the end of this file.
+
+The 0.2.5 brief asked for "the restonia crystal growth: a seed planted in water grows into the crystal
+cluster". **1.3.26 has no such mechanic**, and the gap line that produced it was this port's own wrong
+inference — the 0.2.4 note and `tools/recipe-blockers.json` both said "upstream grows rather than
+crafts". This section records what the jar and the matching source actually say, retracts the claim, and
+states why the chain cannot close with the crystal alone either. Everything below is reproducible:
+
+```sh
+ports/actuallyadditions/tools/audit_restonia_source.sh \
+    > ports/_shared/evidence/actuallyadditions/restonia-source-audit.log   # 499 lines
+```
+
+### The growth rule as read — there is none
+
+| Question the brief asked | What the artefact answers |
+|---|---|
+| `random_ticks`? | **No.** The only `randomTick`/`isRandomlyTicking` in the source are the Coal Generator, the Crusher, Greenhouse Glass, the Oil Generator and the Powered Furnace. No crystal block has one (`CrystalClusterBlock` extends `FullyDirectionalBlock`, whose base classes have none). |
+| a growth state? | **No.** `restonia_crystal_cluster`'s only property is `facing` (the jar's blockstate has six variants, all one model). The constructor takes a `Crystals` argument and **never uses it** (`CrystalClusterBlock.java:48`); the enum itself carries only colours. |
+| how many stages? | **Zero.** A cluster is one block with one shape per facing. |
+| a seed? | **No.** Every registered id containing `seed` is a plant seed (`canola`, `coffee`, `flax`, `rice`, `crystallized/empowered_canola_seed`), and every jar entry containing `seed` is one of those or its texture. |
+| where clusters come from | **A worldgen feature that no longer exists at 1.21.1.** The jar's whole `data/actuallyadditions/worldgen/` tree is 5 configured features (4 crops + `ore_black_quartz`), 5 placed features and one processor list — **no cluster feature**. `WorldGenLushCaves`, which once placed `CRYSTAL_CLUSTERS` on cave walls, is commented out **end to end (194 of 194 lines)**. |
+| what makes a crystal, then | **The Atomic Reconstructor**, in the mod's own words: *"The Atomic Reconstructor is used to craft Crystals … Upon being supplied with power, it shoots out a Laser. It will convert all surrounding items and blocks along the beam's path"* (`booklet.actuallyadditions.chapter.crystals.text.1/2`). The recipe is `laser/crystalize_restonia_crystal`: `#c:dusts/redstone → restonia_crystal`, **40 CF** of a **1000 CF** shot; the shot fires once per **100 ticks** and the default lens reaches **10 blocks**. |
+
+So the 0.2.4 next-slice's "water-placed seed that grows" is not upstream behaviour: crystals come out of
+a machine, not out of water. The **lava** half of the proposed assertion has the same problem — no fluid
+participates in this mechanic at all, so "lava does not grow it" cannot be made fail-capable.
+
+### Why the crystal would not close the chain anyway (an independent blocker)
+
+| Recipe | Keys | Gate |
+|---|---|---|
+| `actuallyadditions:iron_casing` | `W S W / S Q S / W S W`, W=`#c:ingots/iron`, S=`#c:rods/wooden`, **Q=`actuallyadditions:black_quartz`** | black_quartz |
+| `actuallyadditions:basic_coil` | `_ R _ / R I R / _ R _`, R=`restonia_crystal`, **I=`black_quartz`** | black_quartz **and** the crystal |
+| `actuallyadditions:crusher` | 2 `basic_coil` + 2 `iron_casing` + 2 `restonia_crystal` + 2 flint + 4 `#c:cobblestones` | both of the above |
+
+`black_quartz` has exactly two sources in the jar and **both are worldgen**: the `ore_black_quartz`
+configured/placed feature (`count 8`, trapezoid −25…45, `stone_ore_replaceables` +
+`deepslate_ore_replaceables`) attached by the `add_black_quartz` biome modifier, and the **engineer
+house's chest table** (a structure's loot, which also carries an `iron_casing`). The ore's smelting,
+blasting and crushing recipes all take the ore. Nothing crafts `black_quartz`.
+
+So the 0.2.4 gap line — *"with it, the two pieces become survival-reachable"* — is false: the crystal
+alone leaves `iron_casing` and `basic_coil` uncraftable, exactly as the 0.2.4 next-slice's first bullet
+had it ("starting with **`black_quartz`**, which gates both"). The chain is blocked on **`black_quartz`**,
+and a slice that ships only the crystal would have been dead weight.
+
+### What changed in this dispatch — record and tooling only, no version
+
+- `tools/recipe-blockers.json`: the Crusher's blocker is now **`restonia_crystal_source`** (was
+  `restonia_crystal_growth`) and its `why` states the source above; `tools/craft_check.py`'s phase-E
+  docstring + PASS line and `tools/e2e.sh`'s header comment follow the new label and drop the growth
+  claim.
+- `tools/audit_restonia_source.sh` added — the reproducible audit behind every line above.
+- **No package, no version bump, no packed file touched.** Nothing artefact-true was left for this
+  slice to ship, and a version whose only change is a comment is not a version (ruling 2026-11-21).
+  0.2.4's `actuallyadditions.hmod` is byte-identical and still **1/1** under
+  `verify-sdk-package.py`, whose `package matches the tree` line proves no packed byte moved.
+- Still stale **inside** the delivered 0.2.4 bytes, to fix at the next real build (editing them now
+  would desync the tree from the published artifact): `horizon-mod.toml`'s description ("the Crusher's
+  still waits on `restonia_crystal`, which upstream grows rather than crafts") and `README.md`'s
+  `blocked(restonia_crystal_growth)` label.
+
+### Verification of this dispatch
+
+| Step | Command | Result |
+|---|---|---|
+| artefact audit | `tools/audit_restonia_source.sh` | 499 lines, exit 0 — `evidence/actuallyadditions/restonia-source-audit.log` |
+| recipe keys (the blocker still resolves) | `tools/check_recipe_keys.py` | `blocked actuallyadditions:crusher: restonia_crystal_source — actuallyadditions:restonia_crystal` / `2 recipe(s), 1 craftable, 1 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys-blocker-rename.log` |
+| tooling syntax | `python3 -m py_compile tools/craft_check.py`, `bash -n tools/e2e.sh` | both clean |
+| delivered package unchanged | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1**, `110,156 B`, sha256 `f7767eba…dd1d67`, `package matches the tree`, `packed Cargo.lock … 103 entries` |
+
+No ladder and no in-game leg ran: there is no code or content change to build, and `craft_check.py` /
+`e2e.sh` only had comments and one printed label changed (their assertions are untouched). That is why
+the 0.2.4 logs remain the current ones rather than being regenerated for a version that does not exist.
+
+### The next slice, in artefact order
+
+1. **`black_quartz` (the ore) — the only slice that closes the chain.** It is fully data-defined
+   (configured + placed feature + `add_black_quartz` biome modifier, all in the jar), and
+   `ARCHITECTURE.md` §8 (2026-11-18) records worldgen as **no longer a gap**: the SDK ships
+   `BiomeModifiersRegistrar`/`WorldgenHost`. In-game assertion: enter a loaded chunk, find
+   `actuallyadditions:black_quartz_ore`, `ctl break` it from 3.5 blocks and assert the break's own
+   `drops` record names `actuallyadditions:black_quartz`; differential: a stone block at the same depth
+   drops cobblestone, and the same chunk on the **control** game (no package) has no ore. Then
+   `iron_casing` from the two tags + the ore crafts ×1, and the chain continues.
+2. **The Atomic Reconstructor + the crystal conversion** (the artefact's real "make a crystal" slice):
+   a block entity with a 1000 CF buffer (insert `Mth.ceil(power*0.016666F)` per tick), a lens slot, a
+   100-tick cycle, a 10-block beam that converts the first convertible block, and the jar's `laser/*`
+   recipes. In-game assertion: place it facing a redstone-dust block, fill 1000 CF, tick 100, assert a
+   `restonia_crystal` drop and the dust block gone; differential: the same shot at stone emits nothing
+   and spends no CF. **Caveat:** its own recipe needs an `iron_casing`, so it is not survival-reachable
+   before (1).
+3. **Nothing else in the chain** — every remaining piece (`iron_casing`, `basic_coil`, the Crusher, the
+   Atomic Reconstructor) keys on `black_quartz`; the GUI is `blocked(no-single-player-mod-screen)`, and
+   the Double Crusher is a second machine, not a chain piece.
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+## Slice 4 (0.2.5, 2026-11-23) — the Black Quartz Ore, the gem it drops, and the two recipes that need it
+
+**Family:** `actuallyadditions:black_quartz_ore` (a block), `actuallyadditions:black_quartz` (the gem
+it drops), the ore's loot table, its smelting/blasting/crushing recipes, the convention tags
+(`c:ores/black_quartz`, `c:ores`, `c:ores_in_ground/stone`, `c:gems/black_quartz`,
+`c:ingots/iron`, `c:rods/wooden`) and the `iron_casing` recipe — the chain piece the 0.2.4 gap line
+named and the 0.2.5 investigation proved was gated on this one item.
+
+- **Gap line** (`0.2.4`, "Deviations and gaps this slice adds", item 1): *"A player cannot yet obtain
+  an Iron Casing or a Basic Coil in survival. Both are only craftable from `black_quartz` (worldgen)
+  and `restonia_crystal` (grown)…"* — the investigation then proved the first half: `black_quartz`
+  has exactly two sources, the ore and a structure chest, and nothing crafts it.
+- **Why it fits `machines`:** carried content on a machines-tier port (one block, one item, one loot
+  table, three recipes, the tags they key on), proven through blocks and the machine the port
+  already ships — no GUI, no renderer, no new hook beyond the biome-modifier declaration.
+- **Pin:** `0a875da` + mixins `e59da909`.
+
+### Behaviour (from the jar and the source)
+
+| Item | Upstream | This port |
+|---|---|---|
+| `black_quartz_ore` | `ActuallyBlocks.BLACK_QUARTZ_ORE`, `miscBlockProperties()` = `Blocks.STONE` copied, `strength(1.5f, 10f)` (`ActuallyBlocks.java:218, 275`); `mineable/pickaxe` + `needs_stone_tool` (`BlockTagsGenerator:80, 175`) | `horizon/block/black_quartz_ore.json`: template `minecraft:stone`, hardness 1.5, explosion resistance 10.0, `requires_tool`, `item: true`; the jar's blockstate/model/texture; both vanilla tags declared |
+| `black_quartz` | a plain item, stack 64 | `horizon/item/black_quartz.json`: template `minecraft:stick`; the jar's model and texture |
+| loot | the jar's table: silk touch → the ore, otherwise one gem with fortune's `ore_drops` and explosion decay | carried byte-identical (the port pack had already upgraded it to 26.3's `condition`/`modifier` shape and `minecraft:tool/can_silk_touch`) |
+| smelting / blasting | `SimpleCookingRecipeBuilder` 0.7 xp, 200 / 100 ticks | carried byte-identical (26.3 shape: the ingredient is a plain id string) |
+| crushing | `new CrushingBuilder(ore, 2 x black_quartz, 1.0f)` | already carried with the other 48 `crushing/*.json`; it could not run before because its input did not exist |
+| `iron_casing` recipe | `WSW / SQS / WSW`, `W`=`#c:ingots/iron`, `S`=`#c:rods/wooden`, `Q`=black quartz | carried; the two conventions tags declared (`minecraft:iron_ingot`, `minecraft:stick` — NeoForge 1.21.x's lists, the same ones `mekanismtools`, `constructionstick` and `bibliocraft` carry) |
+| worldgen | `configured_feature/ore_black_quartz` (`minecraft:ore`, size 6, `stone_ore_replaceables` + `deepslate_ore_replaceables`), `placed_feature` (count 8, `in_square`, trapezoid −25…45, `biome`), and `neoforge/biome_modifier/add_black_quartz.json` of type **`actuallyadditions:bool_config_feature_modifier`** | the two features carried byte-identical; the modifier **re-typed** — see below |
+
+`tools/assemble_content.py` carries all of it and rewrites nothing else: the tree went from 93 to 119
+files, and the only pre-existing files whose bytes moved are the creative tab (two ids added) and
+`minecraft:mineable/pickaxe` (the ore added).
+
+### The trap: the jar's biome-modifier type is inert here, and the supported route is half-implemented
+
+Upstream attaches the placed feature with `BoolConfigFeatureBiomeModifier`
+(`mod/gen/modifier/BoolConfigFeatureBiomeModifier.java`), a serializer of its own, gated on
+`generateQuartz`. At this pin a data file of that type is skipped with a line
+("biome modifier type … skipped: only add_features, remove_features and none are read"), so shipping
+the jar's file as-is would have produced a package whose ore never generates and whose log said why —
+the exact failure mode the brief named.
+
+Two supported shapes exist, and both were measured:
+
+| Route | Result at `0a875da` |
+|---|---|
+| **data file**, `"type": "neoforge:add_features"`, `biomes "#minecraft:is_overworld"`, `features "actuallyadditions:ore_black_quartz"`, `step "underground_ores"` | **read**: the content root's `biome-modifiers.json` carries it (`["actuallyadditions", "data/actuallyadditions/neoforge/biome_modifier/add_black_quartz.json", …]`) |
+| **code**, `Registrar::declare_biome_modifier("add_black_quartz", BiomeModifier { … AddFeatures { … } })` in `Mod::register` | **accepted, not consumed**: with the data file absent the same file read `"modifiers":[]`; the game has no host for the declaration table at this pin (`grep declare_biome_modifier horizon/crates` finds only the SDK) |
+
+Both are in the package: the data file is what this pin reads, the code declaration is the SDK's
+documented route (so a repin that wires it needs no port change). A feature already in a step is not
+added twice, so the pair is idempotent. **The `generateQuartz` flag has no equivalent here** — no
+config surface exists for a content port at this pin, so the ore always generates once generation
+works (recorded below).
+
+### The generation is `blocked(configured-feature-not-registered)` — measured, not assumed
+
+The features do not reach the registry at this pin, exactly as `silentgems` measured on 2026-11-21
+(`ports/_shared/evidence/silentgems-e2e/worldgen-gap.md`). Reproduced for this package in a fresh
+scratch home (full data in `evidence/actuallyadditions/worldgen-probe-0.2.5.md`):
+
+```text
+place feature actuallyadditions:ore_black_quartz 8 30 8
+  -> Can't find element 'actuallyadditions:ore_black_quartz' in registry 'minecraft:worldgen/feature'
+content root: worldgen/features.json       symlink to vanilla's bundle (no merged copy)
+              worldgen/placed_features.json real, 212,432 B, carries actuallyadditions:ore_black_quartz
+              biome-modifiers.json          carries the data-file modifier (one entry)
+log: Horizon: 1 placed features cannot run and will be skipped
+     Horizon:   actuallyadditions:ore_black_quartz: unknown feature reference actuallyadditions:ore_black_quartz
+```
+
+So `worldgen_entry()` classifies the placed files and not the configured ones: the content loader
+merges `placed_feature/` into its bundle and leaves `configured_feature/` out, and the worldgen
+loader then skips the placed feature it cannot resolve. It is the pin, not this package (the same
+minimal-probe result is recorded in the silentgems evidence). The e2e therefore **asserts the gap**:
+`find-block` answers 0, `place feature` answers "Can't find element", and the loader's warning is
+required in the log — the phase fails the day the pin merges the features, which is the signal to
+restore the generation assertion (`ctl break` a generated ore and read its `drops`).
+
+### TDD
+
+Two rules, each red first.
+
+1. **The generation declaration** (`src/runtime.rs`, pure): the modifier is a namespaced id, a
+   namespaced feature, a vanilla step and a biome id-or-tag. Red
+   (`evidence/actuallyadditions/sdk-test-red-generation.log`, `cargo test --offline`, exit 101):
+
+   ```text
+   error[E0425]: cannot find value `VANILLA_GENERATION_STEPS` in this scope
+   error[E0425]: cannot find function `black_quartz_ore_generation` in this scope
+   error[E0425]: cannot find function `is_namespaced` in this scope
+   ```
+
+   Green: 34 tests (20 runtime, 14 glue), the three new ones
+   `the_black_quartz_ore_generates_in_the_overworlds_underground_ores_step`,
+   `the_modifier_names_namespaced_ids_and_a_vanilla_generation_step`,
+   `a_name_without_a_namespace_is_refused`.
+2. **The carried recipes resolve** (`tools/check_recipe_keys.py`, extended to read a cooking recipe's
+   singular `ingredient`, so the two new cooking recipes are checked and not skipped). Red against
+   the pre-slice tree plus the three new recipe files
+   (`evidence/actuallyadditions/check-recipe-keys-red-0.2.5.log`, exit 1):
+
+   ```text
+   FAIL actuallyadditions:black_quartz_ore_blasting: unresolved actuallyadditions:black_quartz_ore
+   FAIL actuallyadditions:black_quartz_ore_smelting: unresolved actuallyadditions:black_quartz_ore
+   FAIL actuallyadditions:iron_casing: unresolved actuallyadditions:black_quartz, #c:rods/wooden, #c:ingots/iron
+   5 recipe(s), 1 craftable, 1 blocked, 3 failure(s)
+   ```
+
+   Green (`check-recipe-keys-0.2.5.log`): `5 recipe(s), 4 craftable, 1 blocked, 0 failure(s)` — the
+   Crusher stays `blocked(restonia_crystal_source)`.
+
+### In-game transcript (`evidence/actuallyadditions-e2e/e2e-launcher.log`, 0.2.5)
+
+The worldgen gap (asserted):
+
+```text
+  find-block around spawn: {"block":"actuallyadditions:black_quartz_ore","count":0}
+  place feature: {"chat":["Can't find element 'actuallyadditions:ore_black_quartz' in registry 'minecraft:worldgen/feature'", …]}
+  blocked(configured-feature-not-registered): the placed feature is merged and skipped,
+```
+
+The data path:
+
+```text
+  block(10,100,-4) = actuallyadditions:black_quartz_ore
+  at [10.5,100.0,0.0]                       # 3.5 blocks from the block's centre
+  break: {"drops":{"actuallyadditions:black_quartz":1},"picked_up":{},"items_left_on_ground":1}
+  break: {"drops":{"minecraft:cobblestone":1},"picked_up":{},"items_left_on_ground":1}      # stone, same stance
+  held: {… "minecraft:enchantments":{"minecraft:silk_touch":1} …}
+  break: {"drops":{"actuallyadditions:black_quartz_ore":1},"picked_up":{},"items_left_on_ground":1}
+  furnace after 240 ticks: [null,null,{"count":1,"item":"actuallyadditions:black_quartz"}]
+  blast furnace after 240 ticks: [null,null,{"count":1,"item":"actuallyadditions:black_quartz"}]
+  fresh crusher: Crusher at 0,100,-1: 4440/60000 FE …
+  crusher: Crusher at 0,100,-1: 3280/60000 FE …, out0 actuallyadditions:black_quartz x2, …
+```
+
+and the Iron Casing's own recipe, from `tools/craft_check.py` (same run):
+
+```text
+  recipe give actuallyadditions:iron_casing -> {"chat": ["Unlocked 1 recipe(s) for Player27983"], "ok": true}
+  iron casing (4 iron ingots + 4 sticks + 1 black quartz): result {"count": 1, "item": "actuallyadditions:iron_casing", "slot": 200}
+  iron casing …: inventory after the craft {"minecraft:iron_ingot": 2, "minecraft:stick": 2, "actuallyadditions:black_quartz": 2, "actuallyadditions:iron_casing": 1}
+  control: gold ingots where #c:ingots/iron goes (not a member): result null
+  control: iron ingots where #c:rods/wooden goes (not a member): result null
+```
+
+Every assertion can fail and was made to: `SELFTEST=ore` flips the ore's drop assertion
+(`FAIL: SELFTEST ore: the ore dropped Black Quartz (the real assertion); …` + `EXIT:1`),
+`SELFTEST=1` flips the machine's FE (`FAIL: SELFTEST flipped: the placed machine kept 2520 FE, not 0`),
+`NEGATIVE=1` flips the recipe unlock, and the same script on the unmodded game fails at its first
+machine (`FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'`). The
+control leg inside the run also proves the ore's ids are the package's: without it `setblock` answers
+`Unknown block type 'actuallyadditions:black_quartz_ore'`.
+
+### Ladder (0.2.5, slot `W1*/W1121-aa`, `CARGO_INCREMENTAL=0`, `BUILD_LOCAL=1`)
+
+| Step | Result |
+|---|---|
+| tests | **34 passed** (20 runtime, 14 glue), `Compiling actuallyadditions v0.2.5` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings`, exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check`, exit 0 — `sdk-fmt.log` |
+| package ×2 | `cargo horizon-mod build`, twice, **lock kept** — **121,206 B** both, `cmp` identical, sha256 `de43f029…62486`, **130 entries** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `actuallyadditions 0.2.5 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` → **1/1** |
+| in-game | `tools/e2e.sh` (`--offscreen`, launcher-built `native-0a875da-5b58559626c6`) → `PASS` + `EXIT:0` — `e2e-launcher.log` |
+| counterfactual | `SELFTEST=ore` → `FAIL: SELFTEST ore: …` + `EXIT:1` — `e2e-launcher-selftest-ore.log` |
+| counterfactual | `SELFTEST=1` → `FAIL: SELFTEST flipped: the placed machine kept 2520 FE, not 0` + `EXIT:1` — `e2e-launcher-selftest.log` |
+| counterfactual | `NEGATIVE=1` → `FAIL: NEGATIVE: the Coal Generator's recipe unlocked …` + `EXIT:1` — `e2e-launcher-negative.log` |
+| control | `GAME=$CONTROL_GAME` (the same Nightly, no package) → `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` → `logs=5 ok=5` |
+
+Artifact: `actuallyadditions.hmod`, **121,206 B**, sha256
+`de43f029a98fa818f59dfb7ce6cbbb777d3436497ab67195ee1bbb1805662486`, **130 entries** (0.2.4: 103;
+the 26 new files + the re-typed modifier), `Cargo.lock` **packed** (8,850 B,
+`a41aa744…b636fd`, its own version line moved to 0.2.5). The launcher build the leg used is
+`native-0a875da-5b58559626c6`, exported to `~/.cache/horizon-e2e/0a875da/actuallyadditions/`.
+
+### Coverage (slice 4)
+
+| Family | State |
+|---|---|
+| `actuallyadditions:black_quartz_ore` block | **tested** — placed and read back; an unknown id is refused; the control game refuses `setblock` |
+| the ore's loot table | **tested** — mined in survival from 3.5 blocks, the break's own `drops` names `actuallyadditions:black_quartz`; stone mined the same way drops cobblestone (differential); silk touch (a pickaxe given with the component) drops the ore and no gem |
+| the ore's smelting recipe | **tested** — a furnace turns one ore into one `black_quartz`, the ore slot empties |
+| the ore's blasting recipe | **tested** — a blast furnace, same assertion |
+| the ore's crushing recipe | **tested** — a crusher with FE yields `black_quartz x2` and consumes the input |
+| `c:ores/black_quartz`, `c:ores`, `c:ores_in_ground/stone`, `c:gems/black_quartz` | **declared**; the in-game proof of the tag files themselves is positional (a `c:` tag has no command readout), and `check_recipe_keys.py` refuses an empty tag — the ids are the ones the Crushing recipe and the quark consumers name |
+| `c:ingots/iron`, `c:rods/wooden` | **tested** — the `iron_casing` recipe unlocks and crafts from tag members; gold ingots in the iron cells and coal in the rod cells stay empty |
+| `actuallyadditions:iron_casing` recipe | **tested** — crafts one casing from 4 ingots + 4 sticks + 1 gem, all nine consumed, grid empty |
+| the ore's worldgen (configured + placed feature + biome modifier) | **blocked(configured-feature-not-registered)** — the placed feature is merged and skipped, `place feature` answers "Can't find element … in registry 'minecraft:worldgen/feature'", the data-file modifier is read; asserted in the leg |
+| the `generateQuartz` config flag | **not ported** — no config surface for a content port at this pin; the ore is always on |
+
+### Deviations and gaps this slice adds
+
+1. **The ore does not generate at this pin**, `blocked(configured-feature-not-registered)` (the pin,
+   not the package; silentgems measured the same on 2026-11-21). The features and the modifier stay
+   in the package — they are the mod's data and the modifier is already the shape this loader reads —
+   and the e2e asserts the gap so a merge is noticed.
+2. **`generateQuartz` has no equivalent.** Upstream's flag lives in its own config; a content port has
+   no settings surface here, so the ore always generates.
+3. **The jar's `bool_config_feature_modifier` is re-typed** to `neoforge:add_features` (same biomes,
+   feature and step). Shipping the jar's type would have been silently inert.
+4. **`c:storage_blocks/black_quartz` is not carried**: its only member is the Black Quartz Block,
+   which is another slice; a tag naming an id this package does not declare is dropped, and
+   `check_recipe_keys.py` refuses a tag with no values.
+5. **`c:ingots/iron` = `minecraft:iron_ingot`, `c:rods/wooden` = `minecraft:stick`** — NeoForge
+   1.21.x's generated lists, which is what the campaign's other ports carry; a 1.21.1 pack's tags
+   would also hold modded metals/rods, and 26.3 has none to name.
+
+### Harness facts measured while getting there
+
+1. **`ctl enchant` does not reach the break's tool on this pin.** The enchantment shows in
+   `ctl inventory`'s `held` immediately after the command, but the `held` record inside `ctl break`'s
+   reply carries only `minecraft:damage`, and the loot table's silk-touch branch does not fire —
+   measured twice, at 3.5 and 2.5 blocks. A pickaxe *given* with the component
+   (`give @s minecraft:iron_pickaxe[minecraft:enchantments={"minecraft:silk_touch":1}]`) keeps it
+   through the same break and drops the ore block. The silk-touch leg uses the `give` form.
+2. **A generator feeding adjacent crushers reads 0 FE.** Its buffer is emptied every tick into its
+   neighbours, so "wait for the generator to charge the new crusher" must watch the *crusher*
+   (`info 0 100 -1`), not the generator — the first version of the leg failed on `0/60000 FE` while
+   the machine was burning normally.
+3. **The content root's `biome-modifiers.json` is the readout of which modifier route works**:
+   the data file appears there, the `declare_biome_modifier` call does not (0.2.5 measured both).
+4. **A content package's configured features are the half that is missing** (`worldgen/features.json`
+   stays a symlink while `placed_features.json` is a real merged file). The probe that produced this
+   is `evidence/actuallyadditions/worldgen-probe-0.2.5.md`.
+
+### Upstream defects fixed
+
+None found in this slice: the loot table, the three recipes, the tags and the block properties all
+match what the mod's own code says.
+
+**Changelog (0.2.5):**
+
+> **0.2.5 — the Black Quartz Ore, the gem it drops, and the chain it unlocks.** Adds the ore block
+> (the jar's blockstate, model, texture, `minecraft:stone`-copied properties), the `black_quartz`
+> gem, the ore's loot table (silk touch → the ore, otherwise one gem with fortune's `ore_drops`),
+> its smelting, blasting and crushing recipes, the `c:ores`/`c:gems` tags, the `c:ingots/iron` and
+> `c:rods/wooden` tags and the Iron Casing's own recipe, so a casing now crafts from four iron
+> ingots, four sticks and one gem where 0.2.4 could not craft one at all. The worldgen is carried
+> (configured + placed feature) with the jar's custom `bool_config_feature_modifier` re-typed to
+> the platform's `neoforge:add_features`, and `Mod::register` also declares it through the SDK's
+> `declare_biome_modifier`; the ore's *generation* is `blocked(configured-feature-not-registered)`
+> at this pin (a content package's configured features do not reach the feature registry — the
+> same gap silentgems measured), and the e2e asserts the gap. 130 entries, 121,206 B, sha256
+> `de43f029…62486`.
+
+## Next slice (0.2.6)
+
+**Family:** the **Atomic Reconstructor and its laser conversion** — the artefact's real "make a
+crystal" mechanic — because it is the only remaining route to `restonia_crystal`, which the Crusher's
+recipe and `basic_coil` still wait on.
+
+- **Gap line** (0.2.5's coverage table, and the 0.2.5 investigation's item 2): *"The Atomic
+  Reconstructor + the crystal conversion … its own recipe needs an `iron_casing`, so it is not
+  survival-reachable before black_quartz"* — that precondition is now met.
+- **Shape:** a block entity with a 1000 CF buffer (`insert Mth.ceil(power*0.016666F)` per tick), a
+  lens slot, a 100-tick cycle and a 10-block beam converting the first convertible block; the jar's
+  `laser/*` recipes; `iron_casing` + glass + redstone in its own recipe.
+- **In-game assertion that can fail:** place it facing a `#c:dusts/redstone` block, fill 1000 CF,
+  tick 100, assert a `restonia_crystal` drop and the dust gone; differential: the same shot at stone
+  emits nothing and spends the CF it charged.
+- **Out of scope:** the GUI (`blocked(no-single-player-mod-screen)`), the Empowerer and the empowered
+  crystals, the Double Crusher, the ore's generation (a pin gap, re-checked at every repin).
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices

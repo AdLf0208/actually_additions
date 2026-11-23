@@ -1,5 +1,49 @@
 # Validation
 
+**0.2.5 (2026-11-23, pin `0a875da`)** — slice 4: the Black Quartz Ore, the gem it drops, its loot
+table and three recipes, the `c:ores`/`c:gems` tags, the `c:ingots/iron` + `c:rods/wooden` tags and
+the Iron Casing's own recipe. The ore's **generation** is `blocked(configured-feature-not-registered)`
+at this pin (measured; the same gap silentgems recorded) and the e2e asserts it.
+
+| Check | Command | Result |
+|---|---|---|
+| generation rule (red) | `cargo test --offline` before the implementation | `error[E0425]: cannot find … black_quartz_ore_generation / is_namespaced / VANILLA_GENERATION_STEPS`, exit 101 — `evidence/actuallyadditions/sdk-test-red-generation.log` |
+| content rule (red) | `python3 tools/check_recipe_keys.py --port <pre-slice tree + 3 new recipes>` | 3 failures, exit 1 — `check-recipe-keys-red-0.2.5.log` |
+| content rule | `python3 tools/check_recipe_keys.py` | `5 recipe(s), 4 craftable, 1 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys-0.2.5.log` |
+| worldgen probe | `place feature` + the content root's bundles | `Can't find element … in registry 'minecraft:worldgen/feature'`; `features.json` a symlink, `placed_features.json` merged, `biome-modifiers.json` carries the data file — `worldgen-probe-0.2.5.md` |
+| tests | `cargo test --offline` | **34 passed / 0 failed** (20 runtime, 14 glue), `Compiling actuallyadditions v0.2.5` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| package | `cargo horizon-mod build` twice, **lock kept** | **121,206 B** both, `cmp` identical, sha256 `de43f029…62486`, **130 entries with `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.5 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, EXIT 0 — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1** (includes the packed lock) |
+| in-game | `tools/e2e.sh` (`--offscreen`) on the launcher-built game | `PASS` + `EXIT:0` — `actuallyadditions-e2e/e2e-launcher.log` |
+| counterfactual | `SELFTEST=ore tools/e2e.sh` | `FAIL: SELFTEST ore: the ore dropped Black Quartz (the real assertion); …` + `EXIT:1` — `e2e-launcher-selftest-ore.log` |
+| counterfactual | `SELFTEST=1 tools/e2e.sh` | `FAIL: SELFTEST flipped: the placed machine kept 2520 FE, not 0` + `EXIT:1` — `e2e-launcher-selftest.log` |
+| counterfactual | `NEGATIVE=1 tools/e2e.sh` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour) …` + `EXIT:1` — `e2e-launcher-negative.log` |
+| control | `GAME=$CONTROL_GAME tools/e2e.sh` (same Nightly, no package) | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `python3 ports/tools/check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=5 ok=5` |
+
+The launcher build the leg used is `native-0a875da-5b58559626c6`, exported to
+`~/.cache/horizon-e2e/0a875da/actuallyadditions/`. The 0.2.4 block below is superseded; its
+`SELFTEST=drops` log moved to `actuallyadditions-e2e/retired-0.2.4/`.
+
+**0.2.5 investigation (2026-11-23, pin `0a875da`)** — historical: the brief's "restonia crystal
+growth" was **not in the artefact**; that dispatch stopped **blocked** and produced no package. The
+version number went to slice 4 above. The record is in `notes.md` → "0.2.5 investigation #1".
+
+| Check | Command | Result |
+|---|---|---|
+| artefact audit | `tools/audit_restonia_source.sh` | 499 lines, exit 0: no growth tick, no seed item, no cluster worldgen feature, no cluster recipe; `restonia_crystal` = the Atomic Reconstructor's `#c:dusts/redstone` conversion; `black_quartz` = ore feature + engineer-house loot — `evidence/actuallyadditions/restonia-source-audit.log` |
+| recipe keys | `python3 tools/check_recipe_keys.py` | `blocked actuallyadditions:crusher: restonia_crystal_source — actuallyadditions:restonia_crystal`; `2 recipe(s), 1 craftable, 1 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys-blocker-rename.log` |
+| tooling | `python3 -m py_compile tools/craft_check.py`; `bash -n tools/e2e.sh` | both clean |
+| package unchanged | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1** — `110,156 B`, sha256 `f7767eba…dd1d67`, `package matches the tree`, packed `Cargo.lock`, 103 entries |
+
+No ladder, no build and no in-game leg: nothing in `src/`, `assets/` or `data/` changed. The 0.2.4 block
+below remains the current evidence for the delivered package.
+
 **0.2.4 (2026-11-23, pin `0a875da`)** — slice 3: the Iron Casing block, the Basic Coil item and the
 `c:cobblestones` item tag, so the Coal Generator's own recipe resolves and crafts. No Rust change
 (`src/*.rs` byte-identical to 0.2.3).

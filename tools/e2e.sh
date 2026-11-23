@@ -35,18 +35,30 @@
 #    cobblestone (via the `c:cobblestones` tag, including its mossy member), two iron casings and a
 #    coal, all nine items consumed; the same grid with iron ingots in the casing cells and with
 #    stone in the cobblestone cells stays empty, and the Crusher's recipe is still absent from the
-#    recipe manager (blocked on `restonia_crystal`, which upstream grows rather than crafts);
+#    recipe manager (blocked on `restonia_crystal`, whose only upstream source is the
+#    Atomic Reconstructor's laser conversion, which this port does not ship);
+#  - (0.2.5) the Black Quartz Ore's data path: placed and read back, mined in survival from 3.5
+#    blocks it drops `actuallyadditions:black_quartz` from its own carried loot table, stone mined
+#    the same way drops cobblestone (the differential), silk touch drops the ore block and no gem,
+#    it smelts and blasts into one Black Quartz each and crushes into two, and the Iron Casing's
+#    own recipe (`#c:ingots/iron` + `#c:rods/wooden` + the gem) crafts one from the tag members
+#    with all nine items consumed, its two tag keys each proved not to be a wildcard. The ore's
+#    *generation* is `blocked(configured-feature-not-registered)` at this pin and the leg asserts
+#    the gap (a content package's configured features do not reach the feature registry; the
+#    placed feature is merged and skipped, the data-file biome modifier is read) — the day the pin
+#    merges them the phase fails, which is the signal to restore the generation assertion;
 #  - with CONTROL_GAME set, an unmodded game on the same scratch home knows neither id
 #    (`setblock` answers `Unknown block type`), so the ids are the package's.
 #
 # SELFTEST=1 flips the "the placed generator kept its FE" assertion (it must FAIL), proving the
 # scenario can fail; SELFTEST=drops flips the payload assertion ("the container's `Items` travel"),
-# which passes only on the defect this version fixes, so it must fail too. NEGATIVE=1 flips the
-# crafting phase's recipe-book assertion ("the Coal Generator's recipe is not unlocked"), which is the
-# pre-0.2.4 state, so it must fail on this package.
+# which passes only on the defect this version fixes, so it must fail too; SELFTEST=ore flips the
+# ore's drop assertion ("the generated ore drops nothing"), which the carried table makes false, so
+# it must fail. NEGATIVE=1 flips the crafting phase's recipe-book assertion ("the Coal Generator's
+# recipe is not unlocked"), which is the pre-0.2.4 state, so it must fail on this package.
 #
 #   GAME=<launcher-built horizon-client> [CTL=<horizon-ctl>] [CONTROL_GAME=<unmodded game>] \
-#       [SELFTEST=1|drops] [NEGATIVE=1] tools/e2e.sh
+#       [SELFTEST=1|drops|ore] [NEGATIVE=1] tools/e2e.sh
 set -euo pipefail
 export LC_ALL=C
 
@@ -228,6 +240,23 @@ control() {
     case "$reply" in
         *"Unknown block"*) ;;
         *) fail "an unmodded game placed actuallyadditions:coal_generator ($reply)" ;;
+    esac
+    # (0.2.5) The ore block and the gem are the package's too: without it the block does not
+    # exist, and so does not the feature. (The package's own generation is `blocked
+    # (configured-feature-not-registered)` at this pin, so this leg proves the ids, which is
+    # what a content port can prove here.)
+    local ore_reply
+    ore_reply=$(ctl command "setblock 0 100 -1 actuallyadditions:black_quartz_ore" 2>&1 || true)
+    echo "  setblock the ore without the package: $ore_reply"
+    case "$ore_reply" in
+        *"Unknown block"*) ;;
+        *) fail "an unmodded game placed actuallyadditions:black_quartz_ore ($ore_reply)" ;;
+    esac
+    ore_reply=$(ctl command "place feature actuallyadditions:ore_black_quartz 8 30 8" 2>&1 || true)
+    echo "  place feature without the package: $ore_reply"
+    case "$ore_reply" in
+        *"Can't find element"*) ;;
+        *) fail "the feature id resolved without the package ($ore_reply)" ;;
     esac
     ctl quit >/dev/null 2>&1 || true
 }
@@ -889,6 +918,168 @@ ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 4
 
+echo "== worldgen gap: the ore's feature does not reach the registry at this pin (asserted) =="
+# Measured at 0a875da, the same gap `silentgems` recorded on 2026-11-21: a content package's
+# `worldgen/configured_feature` files are not merged into the content root's `worldgen/features.json`
+# (it stays a symlink to vanilla's bundle), so the placed feature is skipped and no ore generates.
+# What this package *does* contribute is provable: the data-file biome modifier reaches
+# `biome-modifiers.json` (`neoforge:add_features`), and the block, the gem, the loot table and
+# every recipe work. This phase fails the day the pin merges the features — the signal to restore
+# the generation assertion.
+ctl command "gamemode creative @s" >/dev/null
+ctl tp 0.5 100 3.5 >/dev/null
+ctl wait 20
+ZERO=$(ctl find-block actuallyadditions:black_quartz_ore 64)
+echo "  find-block around spawn: $(jq -c '{block, count}' <<<"$ZERO")"
+[ "$(jq -r '.count' <<<"$ZERO")" = 0 ] \
+    || fail "the pin now generates the ore: restore the generation assertion (the worldgen gap closed)"
+FEATURE_REPLY=$(ctl command "place feature actuallyadditions:ore_black_quartz 8 30 8" 2>&1)
+echo "  place feature: $FEATURE_REPLY"
+case "$FEATURE_REPLY" in
+    *"Can't find element 'actuallyadditions:ore_black_quartz' in registry 'minecraft:worldgen/feature'"*) ;;
+    *) fail "the placed feature resolved at this pin (the worldgen gap closed): $FEATURE_REPLY" ;;
+esac
+LOG=$(ctl logs --lines 400)
+grep -q "unknown feature reference actuallyadditions:ore_black_quartz" <<<"$LOG" \
+    || fail "the worldgen loader did not report the placed feature as an unknown reference"
+echo "  blocked(configured-feature-not-registered): the placed feature is merged and skipped,"
+echo "    the configured feature never reaches minecraft:worldgen/feature, so no ore generates"
+
+echo "== the placed ore, its loot table and its recipes (0.2.5) =="
+# The data path the gap does not block: place the ore (a generated ore is what the worldgen
+# assertion would use), mine it in survival from 3.5 blocks and read the break's own drop record.
+ORE_X=10; ORE_Z=-4
+SILK_X=14; STONE_X=12
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl command "setblock $ORE_X 100 $ORE_Z actuallyadditions:black_quartz_ore" >/dev/null
+ctl wait 6
+ORE_AT=$(ctl block "$ORE_X" 100 "$ORE_Z" | jq -r '.name // .block // empty')
+echo "  block($ORE_X,100,$ORE_Z) = $ORE_AT"
+[ "$ORE_AT" = "actuallyadditions:black_quartz_ore" ] || fail "the Black Quartz Ore block did not place: $ORE_AT"
+ctl command "gamemode survival @s" >/dev/null
+ctl command "item replace entity @s hotbar.0 with minecraft:iron_pickaxe 1" >/dev/null
+ctl wait 4
+ctl select 1 >/dev/null
+ctl wait 3
+# The block centre is z+0.5; standing at z+4 is exactly 3.5 blocks off (the campaign's stance:
+# within reach, outside the ~1-block pickup radius).
+ctl tp "$ORE_X.5" 100 "$((ORE_Z + 4))" >/dev/null
+ctl wait 6
+echo "  at $(ctl state | jq -c '.player.position')"
+ORE_BREAK=$(ctl break "$ORE_X" 100 "$ORE_Z") || fail "the Black Quartz Ore did not break: $ORE_BREAK"
+echo "  break: $(jq -c '{drops, picked_up, items_left_on_ground}' <<<"$ORE_BREAK")"
+jq -e '(.drops["actuallyadditions:black_quartz"] // 0) >= 1' <<<"$ORE_BREAK" >/dev/null \
+    || fail "the ore did not drop Black Quartz from its carried loot table: $ORE_BREAK"
+echo "  the ore dropped Black Quartz (asserted from the break's own drop record)"
+if [ "$SELFTEST" = ore ]; then
+    jq -e '(.drops["actuallyadditions:black_quartz"] // 0) == 0' <<<"$ORE_BREAK" >/dev/null \
+        || fail "SELFTEST ore: the ore dropped Black Quartz (the real assertion); the flipped assertion 'it drops nothing' fails, so the real one can fail"
+    fail "SELFTEST ore: the flipped assertion passed (the ore dropped nothing), so it proves nothing"
+fi
+ctl wait 15
+ORE_GONE=$(ctl block "$ORE_X" 100 "$ORE_Z" | jq -r '.name // .block // empty')
+[ "$ORE_GONE" = "minecraft:air" ] || fail "the ore was not broken ($ORE_GONE)"
+
+# Differential: plain stone, mined the same way from the same stance, drops vanilla cobblestone —
+# so the drop above is the ore's own table, not the harness.
+ctl command "setblock $STONE_X 100 $ORE_Z minecraft:stone" >/dev/null
+ctl wait 6
+ctl tp "$STONE_X.5" 100 "$((ORE_Z + 4))" >/dev/null
+ctl wait 6
+STONE_BREAK=$(ctl break "$STONE_X" 100 "$ORE_Z") || fail "the differential stone did not break: $STONE_BREAK"
+echo "  break: $(jq -c '{drops, picked_up, items_left_on_ground}' <<<"$STONE_BREAK")"
+jq -e '(.drops["minecraft:cobblestone"] // 0) >= 1' <<<"$STONE_BREAK" >/dev/null \
+    || fail "the same break on stone did not drop cobblestone: $STONE_BREAK"
+echo "  stone at the same depth dropped cobblestone (the same break path, a vanilla table)"
+
+# Silk touch: the jar's table has two alternatives, and the first is the ore itself, so an
+# enchanted pickaxe must drop the ore block and no gem. The enchantment is given *with* the tool
+# (`give …[minecraft:enchantments=…]`), not added by `ctl enchant`: measured on this pin, `ctl
+# enchant` shows the component in `ctl inventory` but the break's own tool snapshot has lost it,
+# and the same break through a fresh `give` keeps it (the drop below is the proof).
+ctl command "kill @e[type=item]" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl command "setblock $SILK_X 100 $ORE_Z actuallyadditions:black_quartz_ore" >/dev/null
+ctl wait 6
+ctl command 'give @s minecraft:iron_pickaxe[minecraft:enchantments={"minecraft:silk_touch":1}]' >/dev/null
+ctl select minecraft:iron_pickaxe >/dev/null
+ctl tp "$SILK_X.5" 100 "$((ORE_Z + 4))" >/dev/null
+ctl wait 8
+SILK_HELD=$(ctl inventory)
+echo "  held: $(jq -c '.held' <<<"$SILK_HELD")"
+grep -q "silk_touch" <<<"$SILK_HELD" || fail "the pickaxe given for the silk-touch leg has no enchantment: $SILK_HELD"
+SILK_BREAK=$(ctl break "$SILK_X" 100 "$ORE_Z") || fail "the silk-touch ore did not break: $SILK_BREAK"
+echo "  break: $(jq -c '{drops, picked_up, items_left_on_ground}' <<<"$SILK_BREAK")"
+jq -e '(.drops["actuallyadditions:black_quartz_ore"] // 0) >= 1' <<<"$SILK_BREAK" >/dev/null \
+    || fail "silk touch did not drop the ore block: $SILK_BREAK"
+jq -e '(.drops["actuallyadditions:black_quartz"] // 0) == 0' <<<"$SILK_BREAK" >/dev/null \
+    || fail "silk touch dropped the gem as well: $SILK_BREAK"
+echo "  silk touch dropped the ore block and no gem (the table's other alternative)"
+
+echo "== the ore smelts and blasts into Black Quartz (the carried recipes) =="
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl tp 17.5 100 -3.5 >/dev/null
+ctl wait 20
+SMELT_X=16; BLAST_X=18; FURN_Z=-6
+ctl command "setblock $SMELT_X 100 $FURN_Z minecraft:furnace" >/dev/null
+ctl command "setblock $BLAST_X 100 $FURN_Z minecraft:blast_furnace" >/dev/null
+ctl wait 6
+ctl container $SMELT_X 100 $FURN_Z actuallyadditions:black_quartz_ore 1 >/dev/null
+ctl container $SMELT_X 100 $FURN_Z minecraft:coal 1 >/dev/null
+ctl container $BLAST_X 100 $FURN_Z actuallyadditions:black_quartz_ore 1 >/dev/null
+ctl container $BLAST_X 100 $FURN_Z minecraft:coal 1 >/dev/null
+echo "  furnace before: $(ctl container $SMELT_X 100 $FURN_Z | jq -c '.slots')"
+echo "  blast furnace before: $(ctl container $BLAST_X 100 $FURN_Z | jq -c '.slots')"
+ctl wait 240
+SMELTED=$(ctl container $SMELT_X 100 $FURN_Z)
+BLASTED=$(ctl container $BLAST_X 100 $FURN_Z)
+echo "  furnace after 240 ticks: $(jq -c '.slots' <<<"$SMELTED")"
+echo "  blast furnace after 240 ticks: $(jq -c '.slots' <<<"$BLASTED")"
+jq -e '.slots[0] == null and .slots[2].item == "actuallyadditions:black_quartz" and .slots[2].count >= 1' \
+    <<<"$SMELTED" >/dev/null || fail "the ore did not smelt into Black Quartz: $SMELTED"
+jq -e '.slots[0] == null and .slots[2].item == "actuallyadditions:black_quartz" and .slots[2].count >= 1' \
+    <<<"$BLASTED" >/dev/null || fail "the ore did not blast into Black Quartz: $BLASTED"
+echo "  both cooking recipes produced one Black Quartz from one ore (the ore slot emptied)"
+
+echo "== the crusher's black_quartz_ore recipe yields 2 Black Quartz =="
+# The carried `crushing/black_quartz_ore.json` could not run before this slice: its input did
+# not exist. A fresh crusher beside the generator takes its FE, and one ore becomes two gems.
+ctl command "setblock 0 100 -1 actuallyadditions:crusher" >/dev/null
+ctl wait 6
+ctl tp 0.5 100 3.5 >/dev/null
+ctl wait 6
+ctl command "item replace entity @s hotbar.0 with minecraft:coal 1" >/dev/null
+ctl wait 3
+feed 0 100 0 minecraft:coal
+# The generator's own buffer reads 0 while it burns: it gives its 20 FE a tick away to both
+# adjacent crushers, so the charge to wait for is the new crusher's, not the generator's.
+CHARGE_LINE=""
+for _ in $(seq 1 30); do
+    CHARGE_LINE=$(info 0 100 -1)
+    [ "$(energy_of "$CHARGE_LINE")" -ge 4000 ] && break
+    ctl wait 20
+done
+echo "  fresh crusher: $CHARGE_LINE"
+[ "$(energy_of "$CHARGE_LINE")" -ge 4000 ] || fail "the generator did not charge the fresh crusher: $CHARGE_LINE"
+feed 0 100 -1 actuallyadditions:black_quartz_ore
+has 0 100 -1 actuallyadditions:black_quartz_ore 1
+CRUSH_LINE=""
+for _ in $(seq 1 20); do
+    CRUSH_LINE=$(info 0 100 -1)
+    [ "$(field_of "$CRUSH_LINE" out0)" = "actuallyadditions:black_quartz x2" ] && break
+    ctl wait 20
+done
+echo "  crusher: $CRUSH_LINE"
+[ "$(field_of "$CRUSH_LINE" out0)" = "actuallyadditions:black_quartz x2" ] \
+    || fail "one ore did not crush into 2 Black Quartz: $CRUSH_LINE"
+no_item 0 100 -1 actuallyadditions:black_quartz_ore
+echo "  one crushed ore became 2 Black Quartz and the input was consumed"
+ctl command "clear @s" >/dev/null
+ctl command "kill @e[type=item]" >/dev/null
+ctl wait 4
+
 control
 
-echo "PASS: a fuelled generator made FE, the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, and the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty, and the Crusher's recipe is still uncraftable because restonia_crystal is not in this slice)"
+echo "PASS: a fuelled generator made FE, the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty, and the Crusher's recipe is still uncraftable because restonia_crystal is not in this slice), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, and the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails)"

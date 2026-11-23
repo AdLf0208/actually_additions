@@ -1,0 +1,18 @@
+{
+  "category": "misc",
+  "key": {
+    "Q": "actuallyadditions:black_quartz",
+    "S": "#c:rods/wooden",
+    "W": "#c:ingots/iron"
+  },
+  "pattern": [
+    "WSW",
+    "SQS",
+    "WSW"
+  ],
+  "result": {
+    "count": 1,
+    "id": "actuallyadditions:iron_casing"
+  },
+  "type": "minecraft:crafting_shaped"
+}

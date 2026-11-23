@@ -26,7 +26,13 @@ the game had no Coal Generator recipe at all. The phases:
   E  the Crusher's own recipe (`RFC / BIB / CFR`) stays uncraftable: every key it
      can get is placed correctly and its two `restonia_crystal` cells are left
      empty (the only thing a player could do), and the result must stay empty —
-     that recipe is `blocked(restonia_crystal_growth)`.
+     that recipe is `blocked(restonia_crystal_source)`;
+  F  the Iron Casing's own recipe (0.2.5, `WSW / SQS / WSW`) unlocks and crafts one
+     casing from four iron ingots (`#c:ingots/iron`), four sticks (`#c:rods/wooden`)
+     and one `actuallyadditions:black_quartz`, every ingredient consumed;
+  G  a tag member that is not a member stays empty — gold ingots where the
+     `#c:ingots/iron` cells go (a wildcard tag would craft);
+  H  the same for `#c:rods/wooden` — coal in its cells leaves the result empty.
 
 `--negative` is the counterfactual: it asserts the *pre-0.2.4* state (the recipe
 is not unlocked) and therefore must fail on this package, proving phase A can
@@ -59,6 +65,10 @@ CRUSHER_CELLS = {
     "b": [GRID["ml"], GRID["mr"]],
     "i": [GRID["mm"]],
 }
+# The Iron Casing (0.2.5), `WSW / SQS / WSW`: `W` = `#c:ingots/iron`,
+# `S` = `#c:rods/wooden`, `Q` = `actuallyadditions:black_quartz`.
+IRON_CELLS = [GRID["tl"], GRID["tr"], GRID["bl"], GRID["br"]]
+ROD_CELLS = [GRID["tm"], GRID["ml"], GRID["mr"], GRID["bm"]]
 
 
 def main() -> int:
@@ -136,6 +146,17 @@ def main() -> int:
         # matters (it never crafts).
         say("  (recorded, not asserted) crusher recipe in the book: "
             f"{json.dumps(run('command', 'recipe give @s actuallyadditions:crusher'))}")
+        # The Iron Casing's own recipe (0.2.5): it resolves only if both `c:` tags and the gem
+        # are present. An empty tag file is dropped at load, which drops the recipe with it, so
+        # this unlock is the in-game half of the "empty tag" trap.
+        casing = run("command", "recipe give @s actuallyadditions:iron_casing")
+        say(f"  recipe give actuallyadditions:iron_casing -> {json.dumps(casing)}")
+        if "Unlocked 1 recipe" not in " ".join(casing.get("chat", [])):
+            failures.append(
+                "`recipe give @s actuallyadditions:iron_casing` did not unlock one recipe — the "
+                "recipe is absent, or one of its two `c:` tags resolved to nothing and the "
+                f"loader dropped it: {json.dumps(casing)}"
+            )
         refused = run("give", "actuallyadditions:restonia_crystal", "1")
         say(f"  give actuallyadditions:restonia_crystal -> {json.dumps(refused)}")
         if "unknown item" not in json.dumps(refused):
@@ -188,15 +209,16 @@ def main() -> int:
             run("click-slot", str(origin))
             wait(1)
 
-    def craft(label, ingredients, placements, left: dict[str, int]) -> None:
+    def craft(label, ingredients, placements, left: dict[str, int],
+              result_item: str = "actuallyadditions:coal_generator") -> None:
         setup(ingredients)
         for item, cells in placements:
             place(item, cells)
         got = result()
         say(f"  {label}: result {json.dumps(got)}")
-        if not got or got.get("item") != "actuallyadditions:coal_generator" or got.get("count") != 1:
+        if not got or got.get("item") != result_item or got.get("count") != 1:
             grid = [s for s in slots() if 100 <= s["slot"] <= 108]
-            failures.append(f"{label}: expected 1 actuallyadditions:coal_generator, got {got} "
+            failures.append(f"{label}: expected 1 {result_item}, got {got} "
                             f"(grid {json.dumps(grid)})")
             return
         run("click-slot", str(RESULT), "shift")
@@ -297,6 +319,49 @@ def main() -> int:
         ],
     )
 
+    # F: the Iron Casing's own recipe (0.2.5), from the two convention tags and the gem.
+    craft(
+        "iron casing (4 iron ingots + 4 sticks + 1 black quartz)",
+        [("minecraft:iron_ingot", 6), ("minecraft:stick", 6),
+         ("actuallyadditions:black_quartz", 3)],
+        [
+            ("minecraft:iron_ingot", IRON_CELLS),
+            ("minecraft:stick", ROD_CELLS),
+            ("actuallyadditions:black_quartz", [CENTRE]),
+        ],
+        {
+            "minecraft:iron_ingot": 2,
+            "minecraft:stick": 2,
+            "actuallyadditions:black_quartz": 2,
+            "actuallyadditions:iron_casing": 1,
+        },
+        result_item="actuallyadditions:iron_casing",
+    )
+
+    # G: `#c:ingots/iron` is a tag, not a wildcard — a gold ingot in its cells crafts nothing.
+    empty_control(
+        "control: gold ingots where #c:ingots/iron goes (not a member)",
+        [("minecraft:gold_ingot", 6), ("minecraft:stick", 6),
+         ("actuallyadditions:black_quartz", 3)],
+        [
+            ("minecraft:gold_ingot", IRON_CELLS),
+            ("minecraft:stick", ROD_CELLS),
+            ("actuallyadditions:black_quartz", [CENTRE]),
+        ],
+    )
+
+    # H: likewise `#c:rods/wooden` — an iron ingot is not a rod.
+    empty_control(
+        "control: iron ingots where #c:rods/wooden goes (not a member)",
+        [("minecraft:iron_ingot", 6), ("minecraft:coal", 4),
+         ("actuallyadditions:black_quartz", 3)],
+        [
+            ("minecraft:iron_ingot", IRON_CELLS),
+            ("minecraft:coal", ROD_CELLS),
+            ("actuallyadditions:black_quartz", [CENTRE]),
+        ],
+    )
+
     try:
         run("close")
     except SystemExit:
@@ -307,11 +372,14 @@ def main() -> int:
         print(f"FAIL: {failure}", file=sys.stderr)
     if failures:
         return 1
-    print("recipe PASS: the Coal Generator's own recipe unlocks, crafts one machine from six "
+    print("recipe PASS: the Coal Generator's own recipe unlocks and crafts one machine from six "
           "cobblestone, two iron casings and a coal (all consumed, empty grid), also crafts from a "
-          "mossy cobblestone tag member, stays empty for iron ingots in the casing cells and for "
-          "stone in the cobblestone cells, and the Crusher's recipe stays uncraftable "
-          "(blocked(restonia_crystal_growth))")
+          "mossy cobblestone tag member, and stays empty for iron ingots in the casing cells and "
+          "for stone in the cobblestone cells; the Iron Casing's own recipe unlocks and crafts one "
+          "casing from four iron ingots (#c:ingots/iron), four sticks (#c:rods/wooden) and one "
+          "black quartz, all nine consumed, and stays empty for gold ingots in the ingot cells and "
+          "coal in the rod cells; the Crusher's recipe stays uncraftable "
+          "(blocked(restonia_crystal_source))")
     return 0
 
 

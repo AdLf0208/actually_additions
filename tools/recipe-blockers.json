@@ -1,6 +1,6 @@
 {
   "actuallyadditions:crusher": {
-    "blocked": "restonia_crystal_growth",
-    "why": "restonia_crystal is grown from a Restonia Crystal Seed in water upstream, never crafted; that mechanic is not in this slice. Everything else the recipe keys on (basic_coil, iron_casing, #c:cobblestones, minecraft:flint) now resolves."
+    "blocked": "restonia_crystal_source",
+    "why": "restonia_crystal is not in this package. At 1.3.26 it has no crafting route: its only non-circular source is the Atomic Reconstructor's laser conversion of #c:dusts/redstone (40 CF of a 1000 CF shot), a machine this port does not ship, and the crystal clusters are not generated at all (the jar's worldgen carries no cluster feature; the lush-cave generator is commented out end to end). The recipe's other keys resolve: #c:cobblestones, basic_coil, iron_casing and the black_quartz the 0.2.5 slice ships (ore block, gem, loot table, smelting/blasting/crushing recipes) \u2014 the ore's *generation* is blocked(configured-feature-not-registered) at this pin, but the gem itself is in the package. Evidence: tools/audit_restonia_source.sh -> ports/_shared/evidence/actuallyadditions/restonia-source-audit.log."
   }
 }

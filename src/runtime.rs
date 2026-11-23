@@ -305,6 +305,65 @@ pub fn is_fuel(burn_time: u32) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Where the Black Quartz Ore generates (upstream's `add_black_quartz` biome modifier)
+// ---------------------------------------------------------------------------
+
+/// Vanilla's generation steps (`GenerationStep.Decoration`), by name, in order. The SDK
+/// refuses a modifier whose step is not one of these.
+pub const VANILLA_GENERATION_STEPS: [&str; 11] = [
+    "raw_generation",
+    "lakes",
+    "local_modifications",
+    "underground_structures",
+    "surface_structures",
+    "strongholds",
+    "underground_ores",
+    "underground_decoration",
+    "fluid_springs",
+    "vegetal_decoration",
+    "top_layer_modification",
+];
+
+/// A biome modifier as this port declares it, in the platform's vocabulary: which placed
+/// feature is added, to which generation step, on which biomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OreGeneration {
+    /// The modifier's own id in the mod's namespace.
+    pub id: &'static str,
+    /// Biome ids or `#tags`.
+    pub biomes: &'static [&'static str],
+    /// The placed feature to add.
+    pub feature: &'static str,
+    /// The generation step to append it to.
+    pub step: &'static str,
+}
+
+/// Upstream 1.3.26's `add_black_quartz` (`ActuallyBiomeModifiers.ADD_BLACK_QUARTZ_ORE_MODIFIER`):
+/// `#minecraft:is_overworld`, `underground_ores`, the `actuallyadditions:ore_black_quartz`
+/// placed feature. Upstream puts it behind its own `bool_config_feature_modifier` type and the
+/// `generateQuartz` flag; the pin reads neither, so the port declares the same addition with
+/// the platform's `add_features` operation and the ore always generates (recorded deviation).
+#[must_use]
+pub fn black_quartz_ore_generation() -> OreGeneration {
+    OreGeneration {
+        id: "add_black_quartz",
+        biomes: &["#minecraft:is_overworld"],
+        feature: "actuallyadditions:ore_black_quartz",
+        step: "underground_ores",
+    }
+}
+
+/// Whether `id` is `namespace:path` with both halves non-empty, as NeoForge ids are. The SDK
+/// refuses a modifier naming `mymod` or `:thing`, so the declaration is checked here instead.
+#[must_use]
+pub fn is_namespaced(id: &str) -> bool {
+    match id.split_once(':') {
+        Some((namespace, path)) => !namespace.is_empty() && !path.is_empty(),
+        None => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The state a broken machine carries on its item (upstream's `actuallyadditions:energy`)
 // ---------------------------------------------------------------------------
 
@@ -622,6 +681,54 @@ mod tests {
             Generator::new(),
             "burn without a maximum is no burn"
         );
+    }
+
+    // The ore's generation (0.2.5). The carried `worldgen/configured_feature` and
+    // `placed_feature` only generate when a biome modifier attaches them, and 1.3.26's own
+    // `add_black_quartz.json` names `actuallyadditions:bool_config_feature_modifier`, a type the
+    // pin does not read. The port declares the same addition itself, so these pin the fields the
+    // SDK's `declare_biome_modifier` refuses when they are wrong (an id outside the mod's
+    // namespace, a name that is not namespaced, a step vanilla does not have, an empty list).
+    #[test]
+    fn the_black_quartz_ore_generates_in_the_overworlds_underground_ores_step() {
+        let generation = black_quartz_ore_generation();
+        assert_eq!(generation.id, "add_black_quartz");
+        assert_eq!(generation.feature, "actuallyadditions:ore_black_quartz");
+        assert_eq!(generation.step, "underground_ores");
+        assert_eq!(generation.biomes, &["#minecraft:is_overworld"]);
+    }
+
+    #[test]
+    fn the_modifier_names_namespaced_ids_and_a_vanilla_generation_step() {
+        let generation = black_quartz_ore_generation();
+        assert!(
+            is_namespaced(generation.feature),
+            "feature {:?} is not namespaced",
+            generation.feature
+        );
+        assert!(
+            VANILLA_GENERATION_STEPS.contains(&generation.step),
+            "step {:?} is not one of vanilla's",
+            generation.step
+        );
+        for biome in generation.biomes {
+            let id = biome.strip_prefix('#').unwrap_or(biome);
+            assert!(
+                is_namespaced(id),
+                "biome {biome:?} is neither an id nor a #tag"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_without_a_namespace_is_refused() {
+        assert!(is_namespaced("actuallyadditions:black_quartz_ore"));
+        assert!(is_namespaced(
+            "#minecraft:is_overworld".trim_start_matches('#')
+        ));
+        assert!(!is_namespaced("black_quartz_ore"));
+        assert!(!is_namespaced(":black_quartz_ore"));
+        assert!(!is_namespaced("actuallyadditions:"));
     }
 
     #[test]

@@ -106,11 +106,16 @@ def tag_exists(tag: str, tags: dict[str, list[str]]) -> bool:
 
 
 def ingredients(recipe: dict) -> list[tuple[str, str]]:
-    """(kind, id) for every ingredient a shaped or shapeless recipe names."""
+    """(kind, id) for every ingredient a shaped, shapeless or cooking recipe names."""
     entries: list[object] = []
     key = recipe.get("key")
     if isinstance(key, dict):
         entries.extend(key.values())
+    # A cooking recipe (`smelting`, `blasting`, ...) names one `ingredient`; the plural
+    # `ingredients` is a shapeless one's list.
+    single = recipe.get("ingredient")
+    if isinstance(single, (str, dict)):
+        entries.append(single)
     ingredients = recipe.get("ingredients")
     if isinstance(ingredients, list):
         for entry in ingredients:

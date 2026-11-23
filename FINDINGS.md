@@ -129,9 +129,9 @@ Upstream's machine recipes are shaped and use convention tags. Read from
 | Recipe | Shape | Keys | Slice |
 |---|---|---|---|
 | `coal_generator` | `CIC / CAC / CIC` | `C` = `#c:cobblestones`, `I` = `actuallyadditions:iron_casing`, `A` = `minecraft:coal` | **crafts (0.2.4)** |
-| `crusher` | `RFC / BIB / CFR` | `R` = `actuallyadditions:restonia_crystal`, `F` = `minecraft:flint`, `C` = `#c:cobblestones`, `B` = `actuallyadditions:basic_coil`, `I` = `actuallyadditions:iron_casing` | `blocked(restonia_crystal_growth)` — `restonia_crystal` is grown, not crafted |
-| `iron_casing` | `WSW / SQS / WSW` | `W` = `#c:ingots/iron`, `S` = `#c:rods/wooden`, `Q` = `actuallyadditions:black_quartz` | not carried: `black_quartz` needs the worldgen ore |
-| `basic_coil` | `_R_ / RIR / _R_` | `R` = `actuallyadditions:restonia_crystal`, `I` = `actuallyadditions:black_quartz` | not carried: both inputs are grown/found, not craftable |
+| `crusher` | `RFC / BIB / CFR` | `R` = `actuallyadditions:restonia_crystal`, `F` = `minecraft:flint`, `C` = `#c:cobblestones`, `B` = `actuallyadditions:basic_coil`, `I` = `actuallyadditions:iron_casing` | `blocked(restonia_crystal_source)` — `restonia_crystal` is neither grown nor crafted: the Atomic Reconstructor's laser converts `#c:dusts/redstone` into it |
+| `iron_casing` | `WSW / SQS / WSW` | `W` = `#c:ingots/iron`, `S` = `#c:rods/wooden`, `Q` = `actuallyadditions:black_quartz` | **crafts (0.2.5)** — both convention tags declared; the gem comes from the ore the same slice ships |
+| `basic_coil` | `_R_ / RIR / _R_` | `R` = `actuallyadditions:restonia_crystal`, `I` = `actuallyadditions:black_quartz` | `blocked(restonia_crystal_source)` — the gem ships (0.2.5) but the crystal still needs the Atomic Reconstructor's laser |
 
 `iron_casing` is a **block** upstream (`ActuallyBlocks.IRON_CASING`: `Blocks.STONE`
 copied, `strength(1.5f, 10f)`, `SoundType.METAL`; in `minecraft:mineable/pickaxe`),
@@ -144,8 +144,18 @@ item model parents the block model. `basic_coil` is a plain item
 
 `black_quartz` has no crafting route in the jar: it comes from
 `black_quartz_ore` (worldgen) by smelting/blasting and from the crusher's
-`black_quartz_ore` recipe, so the two chain pieces above become reachable only
-with the ore or with the grown crystal.
+`black_quartz_ore` recipe, and from the engineer house's chest loot. 0.2.5 ships
+the ore block, the gem, its loot table and those three recipes; the ore's
+*generation* is `blocked(configured-feature-not-registered)` at the pin (a content
+package's configured features do not reach the feature registry), so the gem is
+reachable in game but not yet from generated terrain. `restonia_crystal` is not
+crafted either: at 1.3.26 it is made by the Atomic Reconstructor's laser
+conversion of `#c:dusts/redstone` (40 CF of a 1000 CF shot, one shot per 100
+ticks) — there is no seed and no growth mechanic, and the crystal clusters are
+not generated (`WorldGenLushCaves` is commented out end to end; the jar's
+worldgen carries no cluster feature). Reproducible:
+`tools/audit_restonia_source.sh` →
+`ports/_shared/evidence/actuallyadditions/restonia-source-audit.log`.
 
 ## Class + tier and slice boundary
 
@@ -165,10 +175,14 @@ with the ore or with the grown crystal.
   `actuallyadditions:energy` behaviour. The GUI was attempted and reverted: the pin cannot show a
   content menu's slots on the single-player host (`blocked(no-single-player-mod-screen)`, see
   `notes.md`).
+- **Slice 4 (0.2.5)**: the Black Quartz Ore, the `black_quartz` gem, the ore's loot table and
+  smelting/blasting/crushing recipes, the `c:ores`/`c:gems` tags and the Iron Casing's own recipe
+  (with the `c:ingots/iron` and `c:rods/wooden` conventions). The worldgen data is carried; its
+  generation is a measured pin gap.
 - **Not in slice 1/2**: the GUI/screen (upstream `GuiCoalGenerator`,
   `CrusherScreen`), the Double Crusher, redstone control, item/fluid pipes,
   energy relays/cables (the adjacency link stands in), sounds/particles, the
   crafting chain that makes the two machines craftable
-  (`black_quartz`, `restonia_crystal`, `iron_casing`, `basic_coil` are later
-  slices), config, JEI/booklet, ores/worldgen, the rest of the machine list
-  above.
+  (`restonia_crystal` and `basic_coil` are later slices; `black_quartz`, the ore
+  and `iron_casing` shipped in 0.2.5), config, JEI/booklet, the ore's *generation*
+  at this pin, the rest of the machine list above.
