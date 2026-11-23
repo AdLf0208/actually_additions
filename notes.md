@@ -1951,3 +1951,275 @@ surface that the artefact defines and the port does not ship: `TileEntityAtomicR
   differential: the same machine without a pulse keeps freezing.
 - **Out of scope:** the GUI (`blocked(no-single-player-mod-screen)`), lens items, the Empowerer, the
   Double Crusher, the ore's generation (`blocked(configured-feature-not-registered)`).
+
+## Slice 7 (0.2.8, 2026-11-23) — the redstone mode, the click that sets it, and the conversion's order
+
+**Family:** the Atomic Reconstructor's **redstone mode** — upstream's `isPulseMode`, the
+`tryToggleRedstone` click and the mode's own item — plus the review finding on the conversion
+(`NikitaMGrimm`, `src/support.rs:815-824`: the result was spawned before its source was removed and
+the removal's answer was ignored, and the price was charged on a path that may not have converted).
+
+- **Gap line** (`notes.md`, slice 5 "Deviations and gaps this slice adds", item 2): *"No pulse mode, no
+  wrench, no side configuration. A redstone signal freezes the cycle (as upstream), but the mod's own
+  pulse mode and its `tryToggleRedstone` click are not ported."*
+- **Why it fits `machines`:** a saved-state flag, a branch in a click on a block the port already
+  ships, and no renderer, no new kind of hook and no new item (see check 1).
+- **Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
+  `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
+
+### The two checks the brief asked for, answered from the artefacts
+
+1. **Is there an `ItemPart` route for the wrench?** The route exists (`Registrar::item_part`, used by
+   this port's own `MachineItemPart`), but there is **no `actuallyadditions:wrench`** in the jar: the
+   mod's wrench is `actuallyadditions:laser_wrench` (`ActuallyItems.java:123`), whose own `useOn`
+   links laser relays (`ItemLaserWrench.java:36`) — a family this package does not ship. The redstone
+   toggle is `CommonConfig.Other.redstoneConfigureItem`, a **config value** whose default is
+   `minecraft:redstone_torch` (`.define("redstoneConfigurator", "minecraft:redstone_torch")`,
+   `CommonConfig.java:169`, resolved in `ActuallyAdditions.java:138`). So the slice adds **no item**
+   and no ItemPart: the toggle is a branch in the reconstructor's existing `BlockPart::use_item_on`,
+   which is exactly where upstream's `tryToggleRedstone` sits (`BlockAtomicReconstructor.java:59`).
+   The port has no config surface, so it accepts the default.
+2. **Does the flag ride the state allowlist or need the `pulse_mode` component?** The allowlist:
+   `RECONSTRUCTOR_STATE_KEYS` is now `["energy", "pulse"]` and the flag travels inside
+   `minecraft:block_entity_data`, the carrier this port has used for machine state since 0.2.2 and the
+   pin's documented route (ARCHITECTURE.md §3). The component route *does* work at this pin —
+   `Hooks::component_types` takes a list of type names and `impl mod_api::Component` gives the typed
+   value, as `enderstorage`'s `enderstorage:frequency` proves (`support.rs` there: `Component::id` /
+   `decode` / `encode` + `stack.set`/`stack.get`) — but it is **not** needed: upstream uses a
+   component only because 1.21.1 removed block-entity data from items, and carrying the same flag in
+   two homes (the BE compound *and* an item component) would put the mode's restore on a second path.
+
+### The rules as the artefact states them (`cd9d9c6`)
+
+| Rule | Value | Source |
+|---|---|---|
+| which machines toggle | `isRedstoneToggle()` is **true for the reconstructor only** (the base returns false) | `TileEntityAtomicReconstructor.java:216`, `TileEntityBase.java:250` |
+| the free cycle | `serverTick` runs it only `if (!isRedstonePowered && !isPulseMode)`, so a pulse-mode machine never free-runs | `TileEntityAtomicReconstructor.java:132` |
+| a pulse | `respondsToPulses() = isRedstoneToggle() && isPulseMode`; `updateRedstoneState` calls `activateOnPulse()` on the **rising edge** of `getBestNeighborSignal(pos) > 0` (and once at placement, through `onPlace`) | `TileEntityBase.java:258`, `BlockContainerBase.java:105-114`, `:158-172` |
+| what a pulse does | `activateOnPulse()` → `invokeReconstructor`, i.e. a whole shot: the 1,000 CF gate plus the beam | `TileEntityAtomicReconstructor.java:224` |
+| the toggle | main-hand item `== redstoneConfigureItem` → `isPulseMode = !isPulseMode`, `setChanged()`, `sendUpdate()`, click claimed | `BlockContainerBase.java:98-113` |
+| the mode's words | "Redstone Mode", `Pulse`, `Deactivation` | `assets/actuallyadditions/lang/en_us.json:512-515` |
+| the flag on the item | `collectImplicitComponents` sets `ActuallyComponents.PULSE_MODE`; `applyImplicitComponents` reads it | `TileEntityAtomicReconstructor.java:231-245` |
+| the signal in the save | `isRedstonePowered` is written in `SAVE_TILE` (`"Redstone"`), so an edge is not re-seen after a reload | `TileEntityBase.java:107,121` |
+
+The port's shape: `Reconstructor` gains `pulse: bool` and `signal: Signal` (the level the last tick
+saw, `Signal::{Off, On}`); `tick(signal)` computes the rising edge, stores the level, and returns
+"fire now" — on the edge in pulse mode, on the cycle's zero otherwise. `signal` is **persisted** (the
+port's `redstone` key) because the level the previous tick saw is what makes an edge an edge.
+
+### Upstream defect fixed (the review's finding)
+
+**The conversion spawned its result before removing its source, and ignored the removal's answer.**
+Upstream's item branch (`MethodHandler.java:225-231`) is `addFreshEntity(item)` then
+`setBlockAndUpdate(pos, AIR)` with the result discarded; 0.2.6 copied that shape, so a host that
+refused the removal left **both** the input block and its output in the world, and 0.2.6/0.2.7 charged
+the recipe's energy on that path anyway. The reviewer measured the same class in the 0.2.7 item half,
+where the input was consumed first and the spawned result could fail.
+
+- **What the port does instead:** `runtime::convert(source, energy, state)` owns the order — the
+  source goes first and its answer is checked; the result is emitted only then; a refused emission
+  puts the source back (`Conversion::restore_source`); and the energy is charged only when both
+  writes happened. Both halves implement `Conversion`: the block half's `remove_source` replaces the
+  source with a **block** result in one write (as upstream's `BlockItem` branch already did) and
+  otherwise removes it, restoring the block state it read first if the drop fails; the item half's
+  `remove_source` writes the stack the entity keeps, and restores the whole stack if the output
+  cannot be spawned.
+- **What a user notices:** a machine no longer duplicates a block into both a block and an item when
+  the world refuses the removal, and a refused spawn no longer eats the stack it was converting.
+- Worth an upstream report: yes (a reordering of two calls in `invokeConversionLens`, both halves);
+  not filed — the orchestrator decides that.
+
+### TDD
+
+The pulse rules, the restored mode and the transaction rules were written first, with the new
+functions at `todo!()` so the red is a named test, not a compile error
+(`evidence/actuallyadditions/sdk-test-red-pulse.log`, `cargo test` exit 101):
+
+```text
+---- runtime::reconstructor_tests::a_pulse_mode_machine_fires_once_for_each_rising_edge stdout ----
+thread '…' panicked at src/runtime.rs:628:9:
+not yet implemented: the pulse rule: an edge fires in pulse mode, and pulse mode never runs the cycle
+
+---- runtime::reconstructor_tests::a_refused_removal_leaves_no_result_and_charges_nothing stdout ----
+thread '…' panicked at src/runtime.rs:684:5:
+not yet implemented: the conversion's order: source, result, then the charge
+
+---- support::tests::the_reconstructor_line_is_the_one_the_e2e_asserts stdout ----
+assertion `left == right` failed
+  left: "… facing east, cycle 63/100, …"
+ right: "… facing east, pulse off, cycle 63/100, …"
+
+test result: FAILED. 44 passed; 12 failed
+```
+
+Green: **56 passed**, 0 failed (21 `runtime::tests`, 8 `reconstructor_tests`, 3 conversion rules, 24
+`support::tests`).
+
+### Coverage (slice 7)
+
+| Family | State |
+|---|---|
+| the redstone mode's flip (`isPulseMode`) | **tested** — a fresh machine reads `pulse off`; a stick click leaves it off; a redstone-torch click switches it to `pulse on` and the torch's cell above the machine stays air (the click is claimed) |
+| pulse mode does not free-run | **tested** — 60 ticks with no signal leave the cycle and the buffer exactly where they were |
+| one shot per rising edge | **tested** — a redstone block beside the machine fires one 1,040 CF shot and converts the wire (buffer 2,080 → 1,040); the falling edge fires nothing; a second rising edge fires again (1,040 → 0, two crystals), and the cycle never moves |
+| the differential (no toggle) | **tested** — the same arrangement with `pulse off` keeps its cycle frozen on the same signal, spends nothing and converts nothing |
+| a conversion's order (block half) | **unit-tested** — refused removal: no result, no charge; refused result: the source is put back, no charge; success: both writes, one charge |
+| a conversion's order (item half) | **unit-tested** through the same rule; the game leg re-proves the success path (the 0.2.7 item-half phases, unchanged) |
+| the mode on a broken item | **unit-tested** (`the_reconstructors_drop_carries_its_buffer_and_its_mode_and_not_its_cycle`): the payload carries `energy` and `pulse`, never `cycle` or `redstone` |
+| the generator's and the crusher's clicks | unchanged — they are not redstone-toggle machines upstream either |
+| side configuration | **not ported** — `isRedstoneToggle` is the whole of AA 1.3.26's redstone control for these machines; there is no per-side setting in the jar for them |
+
+### In-game transcript (`evidence/actuallyadditions-e2e/e2e-launcher.log`, 0.2.8)
+
+```
+package: …/actuallyadditions.hmod, 150252 bytes, sha256 5440228fe6a14f9fa35fedd6efe924c1c099a1d5832f466fb6d2438daf123097
+== pulse mode and the wrench click (0.2.8) ==
+  the machine as placed: … facing east, pulse off, cycle 76/100, lens default, sight minecraft:redstone_wire -> actuallyadditions:restonia_crystal @ 40 CF, t=6497
+  after a stick click:   … facing east, pulse off, cycle 23/100, …, t=6550
+  after a redstone-torch click: … facing east, pulse on, cycle 97/100, …, t=6603
+  the torch's own cell above the machine: minecraft:air
+  140 ticks of pulse mode with no signal: … 2080/300000 CF …, pulse on, cycle 97/100, …, t=6765
+  after the first rising edge:  … 1040/300000 CF (…, pulse on, cycle 97/100, …, sight nothing, t=6814); 1 crystal(s)
+  after the falling edge:       … 1040/300000 CF,…, t=6844
+  the wire is back in the beam: … 1040/300000 CF, sight minecraft:redstone_wire -> actuallyadditions:restonia_crystal @ 40 CF, t=6852
+  items before the second edge: [{"item":"actuallyadditions:restonia_crystal","count":1,"pos":[1.58,100.0,30.07]}]
+  after the second rising edge: … 0/300000 CF (…, pulse on, cycle 97/100, …, t=6901); 2 crystal(s)
+  items after the second edge:  [{"item":"actuallyadditions:restonia_crystal","count":2,"pos":[1.01,100.0,29.52]}]
+  the same machine without the toggle: … 10,100,30: 2080/300000 CF (…, pulse off, cycle 56/100, … t=7016) -> … 2080/300000 CF (…, cycle 56/100, … t=7163)
+```
+
+What the numbers say: the mode starts `off` and a stick leaves it there; the redstone torch switches it to `on`
+and is **not** placed (the cell above the machine is air); with pulse mode on and no signal the machine
+neither runs its cycle (97 → 97 over 140 ticks, more than a whole 100-tick cycle) nor spends anything; the
+first rising edge converts the wire for exactly 1,040 CF (gate 1,000 + dust 40) and the falling edge does
+nothing; a second rising edge with a fresh wire converts again, emptying a 2,080 CF buffer to 0, and the
+cycle is still 97. The differential — the same machine, no toggle — keeps its cycle at 56 across 147 ticks
+of the same signal, keeps 2,080 CF and converts nothing. The two crystals merged into one stack of two
+between the reads, which is why `ground` (a count *sum*) is the helper the leg asserts on.
+
+Every assertion can fail. `SELFTEST=pulse` flips the first one ("a rising edge fires nothing"), which
+passes only on a machine without the mode — `FAIL: SELFTEST pulse: the rising edge fired a shot (the real
+assertion); the flipped assertion 'it fires none' fails, so the real one can fail` + `EXIT:1`
+(`e2e-launcher-selftest-pulse.log`). The differential inside the run is the untoggled machine beside it.
+
+### Ladder (0.2.8, slot `W1121-aa`, `CARGO_INCREMENTAL=0`, `BUILD_LOCAL=1`)
+
+| Step | Result |
+|---|---|
+| tests (red first) | 12 failed / 44 passed, the new rules at `todo!()` — `sdk-test-red-pulse.log` |
+| tests | **56 passed**, 0 failed (20 `runtime::tests`, 17 `reconstructor_tests` — 8 rules + 3 pulse + 3 conversion + the restored-mode one, 19 `support::tests`), `Compiling actuallyadditions v0.2.8` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings`, exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check`, exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` — `6 recipe(s), 11 craftable, 0 blocked, 0 failure(s)` — `check-recipe-keys.log` |
+| package ×2 | `cargo horizon-mod build`, twice, **lock kept** — **150,252 B** both, `cmp` identical, sha256 `5440228f…3097`, **152 entries** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `actuallyadditions 0.2.8 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 150252 bytes, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` (the first attempt died on a network reset, `os error 104`; retried, green) |
+| gate | `verify-sdk-package.py actuallyadditions` → **1/1** (packed lock, tree match, runtime hash, skills gate) |
+| launcher build | `native-0a875da-f04bebbba937`, `native-mods.json` names `actuallyadditions 0.2.8` |
+| in-game | `tools/e2e.sh` (`--offscreen`, the launcher build of this package) → `PASS` + `EXIT:0` — `e2e-launcher.log` |
+| counterfactual | `SELFTEST=pulse` → `FAIL: SELFTEST pulse: …` + `EXIT:1` — `e2e-launcher-selftest-pulse.log` |
+| counterfactual | `SELFTEST=1` → `FAIL: SELFTEST flipped: the placed machine kept 2520 FE, not 0` + `EXIT:1` |
+| counterfactual | `SELFTEST=drops` → `FAIL: SELFTEST drops: the payload carries no Items …` + `EXIT:1` |
+| counterfactual | `SELFTEST=ore` → `FAIL: SELFTEST ore: the ore dropped Black Quartz (the real assertion); …` + `EXIT:1` |
+| counterfactual | `SELFTEST=laser` → `FAIL: SELFTEST laser: the beam made a crystal (the real assertion); …` + `EXIT:1` |
+| counterfactual | `SELFTEST=item` → `FAIL: SELFTEST item: the beam converted the dropped item (the real assertion); …` + `EXIT:1` |
+| counterfactual | `NEGATIVE=1` → `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour), …` + `EXIT:1` |
+| control | `GAME=$CONTROL_GAME` (the same Nightly, no package) → `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` → `logs=9 ok=9` |
+
+Artifact: `actuallyadditions.hmod`, **150,252 B**, sha256
+`5440228fe6a14f9fa35fedd6efe924c1c099a1d5832f466fb6d2438daf123097`, **152 entries**,
+`Cargo.lock` **packed** (8,850 B, `13d40f9d…` — its own version line moved to 0.2.8) and byte-equal to
+the tree's. `src/lib.rs` is unchanged; `src/runtime.rs` gained `Signal`, the mode and the conversion rule;
+`src/support.rs` the toggle, the `pulse`/`redstone` keys and the two `Conversion` implementations. Every
+in-game log names the sha above.
+
+### Deviations and gaps this slice adds
+
+1. **The toggle item is the config's default, not a carried wrench.** Upstream reads
+   `CommonConfig.Other.redstoneConfigurator` (default `minecraft:redstone_torch`); the port has no config
+   surface, so it accepts exactly that default. `actuallyadditions:laser_wrench` is *not* carried: its
+   own job is laser-relay linking, which this package does not ship, and a wrench that only toggles would
+   be an inert item for a family that is not here. When a config surface is ported, this constant becomes
+   the setting's value.
+2. **The flag rides `minecraft:block_entity_data`, not a registered component** (check 2 above): one
+   carrier for all of a machine's state beats two, and upstream's component exists only because 1.21.1
+   dropped block-entity data from items.
+3. **The edge is sampled once per tick.** Upstream hears `neighborChanged` and fires inside it, so a
+   signal that rises and falls within one tick would fire there and not here. Redstone at this pin
+   cannot produce a sub-tick pulse from a block, so nothing observable differs; recorded for honesty.
+4. **`redstone` (the last-seen level) is saved but never travels on the dropped item** — it belongs to
+   the world the machine stands in, as upstream's `SAVE_TILE`/loot split has it.
+5. The rest of the 0.2.6/0.2.7 gap list stands: no GUI (`blocked(no-single-player-mod-screen)`), no lens
+   items, no comparator hook, no beam visual, the ore's generation `blocked(configured-feature-not-registered)`.
+
+### Harness facts measured while getting here
+
+1. **A crystal that lands at the beam's block is inside the player's pickup reach** if the player still
+   stands where the click left them (two blocks away). One run read `1 crystal(s)` after two shots for
+   exactly this reason; the phase now teleports the player eight blocks clear before the pulses.
+2. **Two beam drops of the same item can merge into one stack**, so the shot count must be a count *sum*
+   (`ground`), never an entity count: the delivered run shows one entity with `count: 2`.
+3. **A chat-based read is stale by ~40 ticks**, so a "before" sample taken before a `setblock` describes
+   the world from before the write. The differential now places the signal first, waits, and only then
+   takes its baseline (the first attempt compared 149-ticks-apart values and failed on 59 → 53).
+4. **Three concurrent e2e legs OOM-killed two games on this box** (7 GB available, the wave's own e2e runs
+   in flight): every leg prints `cannot connect … is the game running with --control?` and exits 3. Run
+   the legs one at a time.
+5. **`CONTROL=1` is a command-line argument, not an environment variable** in `run-leg-0.2.8.sh`: passing
+   it through `env "$@"` left the script's own `GAME` modded, and the control leg "passed" against the
+   modded game until the script read it from `$@`.
+6. **The launcher reuses cargo's fingerprint.** Its wording is "Checking 1 mod / Compiling the mods
+   against the prebuilt game / Your mods are built", not cargo's `Compiling … (1 of 1)`. The 0.2.8 build
+   that compiled took 8 s (`native-0a875da-f04bebbba937`, the export the legs ran); rebuilding after the
+   README-only correction took 1 s and `native-0a875da-9166d4121218`, and `native-mods.json` names
+   `actuallyadditions 0.2.8` in both — proof that the doc change touched nothing the mod compiles
+   (`evidence/actuallyadditions/launcher-build.log`).
+
+**Changelog (0.2.8):**
+
+> **0.2.8 — the reconstructor's redstone mode, and the conversion's order.** A redstone signal freezes
+> the Atomic Reconstructor's cycle (0.2.6); a click holding upstream's redstone configurator (the config's
+> default, a redstone torch) now switches it to **pulse mode**: one shot per rising edge of the neighbour
+> signal, the cycle never running, the click claimed so the torch is not placed. The mode is saved, is in
+> `/actuallyadditions info` (`pulse on|off`), and travels on the machine's broken item beside its buffer
+> (`minecraft:block_entity_data`), so a picked-up machine comes back in the mode it was in. The
+> conversion itself now does its two writes in the order that keeps the world consistent — the source
+> first and its answer checked, the result only if it went, the source put back if not, and the recipe's
+> energy charged only when the conversion happened — in the block half and the item half; upstream spawns
+> the result before removing the source and ignores the removal's answer, which can leave both the input
+> and its output in the world (the review's finding on 0.2.6/0.2.7). 56 unit tests, 9 in-game legs,
+> 152 entries, 150,252 B, sha256 `5440228f…3097`.
+
+## Next slice (0.2.9)
+
+**Family:** the **lens items and the lens slot** — the one part of the reconstructor upstream still has
+and this port cannot use. Checked against the jar while writing this, because the 0.2.6 note guessed at a
+blocker that is not there:
+
+- `actuallyadditions:lens` **is craftable in a crafting table** (`GGG / GBG / GGG` = eight
+  `#c:glass_blocks` + one `black_quartz`, `data/…/recipe/lens.json`), and `black_quartz` ships — so a lens
+  *can* be had in survival once the `c:glass_blocks` tag is declared. `lens_of_the_killer`,
+  `lens_of_the_miner` and `lens_of_disenchanting` are crafting recipes too.
+- the jar's `laser/` folder also holds five **lens → lens** conversions (`lens` → `lens_of_color` →
+  … → `lens_of_certain_death` → `lens`, 5,000 CF each). Those are matched by the **item half the port
+  already ships**: a *dropped* lens converts today, as soon as the item exists.
+- what is genuinely missing is the slot's behaviour: `getLens()` turns the held `ILensItem` into the
+  beam's `Lens`, whose `getDistance` and `canInvoke`/`invoke` decide what the beam reaches and what it
+  does (the miner's lens breaks blocks, the killer's damages entities, the detonator's explodes).
+
+- **Gap line** (0.2.6 coverage table, "the lens slot"): *"not ported — no item in this package is an
+  `ILensItem`; the slot is declared, nothing can fill it, and the click refuses every item"*.
+- **Why it fits `machines`:** items, a slot the machine already has and a rule inside it — no new block,
+  no renderer, no new hook kind.
+- **In-game assertion that can fail:** craft the lens from eight glass and a Black Quartz (all consumed),
+  right-click it into the slot (the click accepts it instead of refusing), assert the `info` line's
+  `lens actuallyadditions:lens x1`; then a dropped lens in the beam converts to `lens_of_color` for
+  5,040 CF (the item half plus the gate); differential: a dropped non-lens stays, and a *second* lens is
+  refused by an occupied slot.
+- **Out of scope:** the four behaviour lenses' own effects (a following slice; each needs a different
+  beam action), the GUI (`blocked(no-single-player-mod-screen)`), the Double Crusher, the ore's
+  generation (`blocked(configured-feature-not-registered)`), the beam's visual.
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices

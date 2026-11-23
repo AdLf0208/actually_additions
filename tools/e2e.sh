@@ -68,6 +68,13 @@
 #    item too (upstream's box is inverted on that facing); and the two `laser/` recipes whose terms
 #    only ever match a dropped item convert at their own energy (rotten flesh -> leather at 20,000
 #    CF, quartz -> prismarine shard at 30,000 CF);
+#  - (0.2.8) the reconstructor's redstone mode: a fresh machine reads `pulse off` and a click with
+#    any other item leaves it there; a click holding `minecraft:redstone_torch` (upstream's
+#    `redstoneConfigurator` default) switches it to `pulse on` and the torch is never placed; in
+#    pulse mode the cycle does not run and no shot is paid without a signal; a redstone block beside
+#    it fires exactly one 1,040 CF shot per rising edge (two edges, two shots, a 2,080 CF buffer
+#    emptied, the cycle untouched and the torch's cell still air); the differential — the same
+#    machine without the toggle — keeps its cycle frozen on the same signal and spends nothing;
 #  - with CONTROL_GAME set, an unmodded game on the same scratch home knows neither id
 #    (`setblock` answers `Unknown block type`), so the ids are the package's.
 #
@@ -77,12 +84,13 @@
 # ore's drop assertion ("the generated ore drops nothing"), which the carried table makes false, so
 # it must fail; SELFTEST=laser flips the beam's crystal assertion ("the beam makes nothing"), which
 # the restonia conversion makes false, so it must fail; SELFTEST=item flips the item half's assertion
-# ("the beam converts no dropped item"), which the drop makes false, so it must fail. NEGATIVE=1
-# flips the crafting phase's recipe-book assertion ("the Coal Generator's recipe is not unlocked"),
-# which is the pre-0.2.4 state, so it must fail on this package.
+# ("the beam converts no dropped item"), which the drop makes false, so it must fail; SELFTEST=pulse
+# flips the pulse phase's first assertion ("a rising edge fires nothing"), which the toggle makes
+# false, so it must fail. NEGATIVE=1 flips the crafting phase's recipe-book assertion ("the Coal
+# Generator's recipe is not unlocked"), which is the pre-0.2.4 state, so it must fail on this package.
 #
 #   GAME=<launcher-built horizon-client> [CTL=<horizon-ctl>] [CONTROL_GAME=<unmodded game>] \
-#       [SELFTEST=1|drops|ore|laser|item] [NEGATIVE=1] tools/e2e.sh
+#       [SELFTEST=1|drops|ore|laser|item|pulse] [NEGATIVE=1] tools/e2e.sh
 set -euo pipefail
 export LC_ALL=C
 
@@ -208,6 +216,7 @@ burning_of() { sed -nE 's/.*burning ([0-9]+)\/([0-9]+).*/\1/p' <<<"$1"; }
 burn_max_of() { sed -nE 's/.*burning [0-9]+\/([0-9]+).*/\1/p' <<<"$1"; }
 progress_of() { sed -nE 's/.*progress ([0-9]+)\/[0-9]+.*/\1/p' <<<"$1"; }
 cycle_of() { sed -nE 's/.*cycle ([0-9]+)\/[0-9]+.*/\1/p' <<<"$1"; }
+pulse_of() { sed -nE 's/.*pulse (on|off),.*/\1/p' <<<"$1"; }
 facing_of() { sed -nE 's/.*facing ([a-z]+),.*/\1/p' <<<"$1"; }
 sight_of() { sed -nE 's/.*sight (.*), t=[0-9]+.*/\1/p' <<<"$1"; }
 block_state_of() { ctl block "$1" "$2" "$3" | jq -r '.state // .name // .block // empty'; }
@@ -1558,6 +1567,140 @@ ctl command "kill @e[type=item]" >/dev/null
 ctl command "gamemode creative @s" >/dev/null
 ctl wait 4
 
+# ---------------------------------------------------------------------------
+# L: pulse mode and the redstone configurator (0.2.8)
+# ---------------------------------------------------------------------------
+# Upstream's `TileEntityAtomicReconstructor` is a redstone-toggle machine (`isRedstoneToggle`):
+# `serverTick` runs the cycle only under `!isRedstonePowered && !isPulseMode`, and
+# `BlockContainerBase.updateRedstoneState` calls `activateOnPulse` — one full shot — on a rising edge
+# while `respondsToPulses()`. A click holding `CommonConfig.Other.redstoneConfigurator` (default
+# `minecraft:redstone_torch`) flips the mode and claims the click, so the torch is never placed.
+# A fresh row of arena, so nothing from the earlier phases can stand in the beam.
+echo "== pulse mode and the wrench click (0.2.8) =="
+PULSE_Z=30
+PULSE_X=0
+ctl command "fill -8 99 25 24 99 34 minecraft:stone" >/dev/null
+ctl command "fill -8 100 25 24 110 34 minecraft:air" >/dev/null
+# click_with ITEM X Y Z: stand beside the machine and right-click its top face with ITEM in hand
+# (the player's own click, as `feed` does for a machine input).
+click_with() { # click_with ITEM X Y Z
+    ctl command "execute in minecraft:overworld run tp @s $2.5 100 $(( $4 - 2 )).5" >/dev/null
+    ctl wait 6
+    ctl command "item replace entity @s hotbar.0 with $1 1" >/dev/null
+    ctl wait 4
+    ctl select 1 >/dev/null
+    ctl wait 3
+    ctl look-at-block "$2" "$3" "$4" up >/dev/null
+    ctl wait 2
+    ctl interact "$2" "$3" "$4" >/dev/null 2>&1 || true
+    ctl wait 4
+}
+ctl command "setblock $PULSE_X 100 $PULSE_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $((PULSE_X + 1)) 100 $PULSE_Z minecraft:redstone_wire" >/dev/null
+ctl tp "$((PULSE_X + 4)).5" 100 "$(centre "$PULSE_Z")" >/dev/null
+ctl wait 20
+line=$(info "$PULSE_X" 100 "$PULSE_Z")
+echo "  the machine as placed: $line"
+[ "$(pulse_of "$line")" = "off" ] || fail "a fresh reconstructor is not in pulse mode: $line"
+
+# L1: the differential for the click — any other item is refused and leaves the mode alone.
+click_with minecraft:stick "$PULSE_X" 100 "$PULSE_Z"
+line=$(info "$PULSE_X" 100 "$PULSE_Z")
+echo "  after a stick click: $line"
+[ "$(pulse_of "$line")" = "off" ] || fail "a stick toggled the redstone mode: $line"
+
+# L2: the configurator toggles it, and the torch is never placed on the machine.
+click_with minecraft:redstone_torch "$PULSE_X" 100 "$PULSE_Z"
+line=$(info "$PULSE_X" 100 "$PULSE_Z")
+echo "  after a redstone-torch click: $line"
+[ "$(pulse_of "$line")" = "on" ] || fail "the redstone configurator did not switch the machine to pulse mode: $line"
+PULSE_MODE_ON="$line"
+PULSE_BLOCK=$(block_state_of "$PULSE_X" 101 "$PULSE_Z")
+echo "  the torch's own cell above the machine: ${PULSE_BLOCK:-air}"
+case "$PULSE_BLOCK" in
+    ""|"minecraft:air"|"minecraft:cave_air") ;;
+    *) fail "the click placed the torch on the machine instead of claiming it: $PULSE_BLOCK" ;;
+esac
+
+# Stand clear of the drops before the shots: a player within ~1 block collects an item entity after
+# its ten-tick delay (notes.md, harness fact 3), so a crystal that lands at the beam's block would be
+# in the player's inventory rather than on the ground, and the shot count would read short.
+ctl tp "$((PULSE_X + 8)).5" 100 "$(centre "$PULSE_Z")" >/dev/null
+ctl wait 6
+
+# L3: pulse mode never free-runs: with no signal the cycle stands still and no shot is paid. 140
+# ticks is more than the machine's own 100-tick cycle, so a machine that ignored the mode (and so
+# restarted and ran its cycle) would have fired and spent its 1,000 CF gate by now.
+CYCLE_BEFORE=$(cycle_of "$PULSE_MODE_ON")
+charge "$PULSE_X" 100 "$PULSE_Z" 2080 >/dev/null
+ctl wait 140
+line=$(info "$PULSE_X" 100 "$PULSE_Z")
+echo "  140 ticks of pulse mode with no signal: $line"
+[ "$(cycle_of "$line")" = "$CYCLE_BEFORE" ] || fail "the cycle ran in pulse mode (${CYCLE_BEFORE} -> $(cycle_of "$line")): $line"
+[ "$(energy_of "$line")" = 2080 ] || fail "pulse mode fired without a signal: $line"
+
+# L4: one shot per rising edge. A redstone block beside the machine is the edge; it is removed and
+# put back for the second shot, with a fresh wire in the beam each time (the beam's own conversion
+# removes the wire). 1,000 CF of gate plus redstone dust's 40 CF per shot.
+ctl command "kill @e[type=item]" >/dev/null
+ctl command "setblock $((PULSE_X - 1)) 100 $PULSE_Z minecraft:redstone_block" >/dev/null
+ctl wait 40
+line=$(info "$PULSE_X" 100 "$PULSE_Z")
+SHOTS=$(ground actuallyadditions:restonia_crystal)
+echo "  after the first rising edge: $line; $SHOTS crystal(s)"
+if [ "$SELFTEST" = pulse ]; then
+    # The counterfactual: the flipped assertion says a rising edge fires nothing. It passes only on
+    # a machine without pulse mode, so this run must fail.
+    [ "$SHOTS" = 0 ] || fail "SELFTEST pulse: the rising edge fired a shot (the real assertion); the flipped assertion 'it fires none' fails, so the real one can fail"
+    fail "SELFTEST pulse: the flipped assertion passed (no shot), so it proves nothing"
+fi
+[ "$SHOTS" = 1 ] || fail "the first rising edge fired $SHOTS shot(s), not one"
+[ "$(energy_of "$line")" = 1040 ] || fail "the first shot did not cost 1,040 CF: $line"
+[ "$(cycle_of "$line")" = "$CYCLE_BEFORE" ] || fail "a pulse shot advanced the cycle: $line"
+ctl command "setblock $((PULSE_X - 1)) 100 $PULSE_Z minecraft:air" >/dev/null
+ctl wait 20
+line=$(info "$PULSE_X" 100 "$PULSE_Z")
+echo "  after the falling edge: $line"
+[ "$(energy_of "$line")" = 1040 ] || fail "the falling edge fired: $line"
+ctl command "setblock $((PULSE_X + 1)) 100 $PULSE_Z minecraft:redstone_wire" >/dev/null
+echo "  the wire is back in the beam: $(info "$PULSE_X" 100 "$PULSE_Z")"
+echo "  items before the second edge: $(ctl entities 12 item | jq -c '[.entities[] | {item: .item.item, count: (.item.count // 1), pos}]')"
+ctl command "setblock $((PULSE_X - 1)) 100 $PULSE_Z minecraft:redstone_block" >/dev/null
+ctl wait 40
+line=$(info "$PULSE_X" 100 "$PULSE_Z")
+SHOTS=$(ground actuallyadditions:restonia_crystal)
+echo "  after the second rising edge: $line; $SHOTS crystal(s)"
+echo "  items after the second edge: $(ctl entities 12 item | jq -c '[.entities[] | {item: .item.item, count: (.item.count // 1), pos}]')"
+[ "$SHOTS" = 2 ] || fail "two rising edges fired $SHOTS conversion(s), not two"
+[ "$(energy_of "$line")" = 0 ] || fail "two 1,040 CF shots did not empty a 2,080 CF buffer: $line"
+
+# L5: the differential machine — the same arrangement without the toggle. Its cycle runs freely at
+# first, then a constant signal freezes it (upstream's `!isRedstonePowered` branch) and it spends
+# nothing: the mode, not the signal, is what turns a level into a shot.
+DIFF_X=10
+ctl command "setblock $DIFF_X 100 $PULSE_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $((DIFF_X + 1)) 100 $PULSE_Z minecraft:redstone_wire" >/dev/null
+ctl tp "$((DIFF_X + 4)).5" 100 "$(centre "$PULSE_Z")" >/dev/null
+ctl wait 30
+charge "$DIFF_X" 100 "$PULSE_Z" 2080 >/dev/null
+ctl command "kill @e[type=item]" >/dev/null
+# The signal first, then a settling wait: both reads below must be taken while it is already on,
+# or the "before" sample is one the machine took while it was still running its cycle.
+ctl command "setblock $((DIFF_X - 1)) 100 $PULSE_Z minecraft:redstone_block" >/dev/null
+ctl wait 60
+DIFF_BEFORE=$(info "$DIFF_X" 100 "$PULSE_Z")
+ctl wait 140
+line=$(info "$DIFF_X" 100 "$PULSE_Z")
+echo "  the same machine without the toggle: $DIFF_BEFORE -> $line"
+[ "$(pulse_of "$line")" = "off" ] || fail "the differential machine is in pulse mode: $line"
+[ "$(energy_of "$line")" = 2080 ] || fail "a machine without pulse mode spent energy on a constant signal: $line"
+[ "$(cycle_of "$line")" = "$(cycle_of "$DIFF_BEFORE")" ] || fail "a signal did not freeze the differential's cycle: $line"
+[ "$(ground actuallyadditions:restonia_crystal)" = 0 ] || fail "a machine without pulse mode converted a block"
+
+ctl command "clear @s" >/dev/null
+ctl command "kill @e[type=item]" >/dev/null
+ctl wait 4
+
 control
 
-echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed"
+echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), the reconstructor's redstone mode started off and a stick left it there while a click holding a redstone torch switched it to pulse mode without placing the torch, pulse mode neither ran its cycle nor fired without a signal, a redstone block beside the machine fired exactly one 1,040 CF shot on each of two rising edges (two crystals, a 2,080 CF buffer emptied, the cycle untouched) while the same machine without the toggle stayed frozen on the same signal and spent nothing, and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed"

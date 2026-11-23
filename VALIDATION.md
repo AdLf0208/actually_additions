@@ -1,5 +1,49 @@
 # Validation
 
+**0.2.8 (2026-11-23, pin `0a875da`)** — slice 7: the Atomic Reconstructor's **redstone mode** and the
+**conversion's order**. `isPulseMode` is upstream's second mode: `serverTick` runs the 100-tick cycle only
+under `!isRedstonePowered && !isPulseMode`, and a rising edge of `getBestNeighborSignal` fires one whole
+shot (`activateOnPulse` → `invokeReconstructor`, the 1,000 CF gate included); a click holding
+`CommonConfig.Other.redstoneConfigurator` — a config value whose default is `minecraft:redstone_torch` —
+flips it and claims the click. The mode is saved, printed by `/actuallyadditions info` (`pulse on|off`)
+and carried on the broken machine's item. The reviewer's finding on 0.2.6/0.2.7 is fixed in both
+halves: the source goes first and its answer is checked, the result only then, the source is put back if
+the result cannot be made, and the recipe's energy is charged only when the conversion happened
+(`runtime::convert`). The rules, the artefact lines and the two pre-code checks are in `notes.md` →
+"Slice 7"; the upstream defect is under "Upstream defects fixed" there.
+
+| Check | Command | Result |
+|---|---|---|
+| rules (red) | `cargo test --offline` before the implementation | **12 failed / 44 passed**: six named `not yet implemented` panics (pulse ×3, restored mode, conversion ×3 at `src/runtime.rs:628/657/684`) and two `support` assertion failures (the `pulse off` field, the `pulse` payload key) — `evidence/actuallyadditions/sdk-test-red-pulse.log` |
+| tests | `cargo test --offline` after `cargo clean -p actuallyadditions` | **56 passed / 0 failed** (20 runtime, 17 reconstructor — 8 rules + 3 pulse + 3 conversion + the restored-mode one, 19 glue), `Compiling actuallyadditions v0.2.8` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` | `6 recipe(s), 11 craftable, 0 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys.log` |
+| package | `cargo horizon-mod build` twice, **lock kept** | **150,252 B** both, `cmp` identical, sha256 `5440228fe6a14f9fa35fedd6efe924c1c099a1d5832f466fb6d2438daf123097`, **152 entries with `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.txt` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.8 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 150252 bytes, EXIT 0 — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1** (packed lock, tree match, runtime hash, skills gate) |
+| in-game | `tools/e2e.sh` (`--offscreen`, launcher build `native-0a875da-f04bebbba937`) | `PASS` + `EXIT:0` — `actuallyadditions-e2e/e2e-launcher.log` |
+| counterfactual | `SELFTEST=pulse` | `FAIL: SELFTEST pulse: the rising edge fired a shot (the real assertion); …` + `EXIT:1` — `e2e-launcher-selftest-pulse.log` |
+| counterfactual | `SELFTEST=1` | `FAIL: SELFTEST flipped: the placed machine kept 2520 FE, not 0` + `EXIT:1` |
+| counterfactual | `SELFTEST=drops` | `FAIL: SELFTEST drops: the payload carries no Items …` + `EXIT:1` |
+| counterfactual | `SELFTEST=ore` | `FAIL: SELFTEST ore: …` + `EXIT:1` |
+| counterfactual | `SELFTEST=laser` | `FAIL: SELFTEST laser: …` + `EXIT:1` |
+| counterfactual | `SELFTEST=item` | `FAIL: SELFTEST item: …` + `EXIT:1` |
+| counterfactual | `NEGATIVE=1` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour), …` + `EXIT:1` |
+| control | `GAME=$CONTROL_GAME` (same Nightly, no package) | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` |
+| log audit | `python3 ports/tools/check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=9 ok=9` |
+
+The pulse phase prints (from `e2e-launcher.log`): the machine placed reads `pulse off`; a stick click
+leaves it off; a redstone-torch click reads `pulse on` and the cell above the machine is still air; 140
+ticks with no signal leave `2080/300000 CF` and `cycle 97/100` untouched; the first rising edge gives
+`1040/300000 CF` and one crystal, the falling edge nothing, a second rising edge `0/300000 CF` and two
+crystals, the cycle still 97; and the same machine without the toggle stays at `2080/300000 CF` and
+`cycle 56/100` across 147 ticks of the same signal. `src/runtime.rs` gained `Signal`, the mode and
+`Conversion`/`convert`; `src/support.rs` the toggle click and the two `Conversion` implementations;
+`src/lib.rs` is unchanged. Every log names the sha above.
+
 **0.2.7 (2026-11-23, pin `0a875da`)** — slice 6: the beam's **item-entity half**. The Atomic
 Reconstructor's `invokeConversionLens` also converts the **dropped items** in the box from the
 machine to the block it hit (`new AABB(tile, hit + 1).inflate(0.02).expandTowards(facing)`), as many

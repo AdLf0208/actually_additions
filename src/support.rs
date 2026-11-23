@@ -21,11 +21,11 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    CONVERTED_MARKER, CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, CrushResult, Crusher,
-    CrushingRecipe, GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, LaserRecipe,
+    CONVERTED_MARKER, CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, Conversion, CrushResult,
+    Crusher, CrushingRecipe, GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, LaserRecipe,
     RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_LENS_DISTANCE, RECONSTRUCTOR_MAX_INSERT,
-    RECONSTRUCTOR_TICKS, Reconstructor, Step, bonus_for, can_crush, clamp_energy,
-    comparator_strength, conversion_plane, facing_for_placement, ingredient_json, is_fuel,
+    RECONSTRUCTOR_TICKS, Reconstructor, Signal, Step, bonus_for, can_crush, clamp_energy,
+    comparator_strength, conversion_plane, convert, facing_for_placement, ingredient_json, is_fuel,
     item_scan_box, items_possible, may_convert, reconstructor_comparator, restored_crusher,
     restored_generator, restored_reconstructor,
 };
@@ -284,6 +284,8 @@ pub(crate) fn read_reconstructor(saved: &Tag) -> Reconstructor {
     Reconstructor {
         energy: clamp_energy(int(saved, "energy"), RECONSTRUCTOR_CAPACITY),
         cycle: int(saved, "cycle").max(0) as u32,
+        pulse: int(saved, "pulse") != 0,
+        signal: Signal::of(int(saved, "redstone") != 0),
     }
 }
 
@@ -291,6 +293,8 @@ pub(crate) fn read_reconstructor(saved: &Tag) -> Reconstructor {
 pub(crate) fn write_reconstructor(saved: &mut Tag, state: &Reconstructor) {
     set_int(saved, "energy", state.energy);
     set_int(saved, "cycle", state.cycle as i32);
+    set_int(saved, "pulse", i32::from(state.pulse));
+    set_int(saved, "redstone", i32::from(state.signal == Signal::On));
 }
 
 // ---------------------------------------------------------------------------
@@ -387,9 +391,10 @@ pub(crate) fn reconstructor_line(
         Some((item, count)) => format!("{item} x{count}"),
         None => "default".to_owned(),
     };
+    let mode = if state.pulse { "on" } else { "off" };
     format!(
-        "Atomic Reconstructor at {},{},{}: {}/{} CF (comparator {}, facing {facing}, cycle {}/{}, \
-         lens {lens}, sight {sight}, t={t})",
+        "Atomic Reconstructor at {},{},{}: {}/{} CF (comparator {}, facing {facing}, pulse {mode}, \
+         cycle {}/{}, lens {lens}, sight {sight}, t={t})",
         pos[0],
         pos[1],
         pos[2],
@@ -723,8 +728,8 @@ pub(crate) fn tick_reconstructor(
 ) -> bool {
     let before = read_reconstructor(saved);
     let mut state = before.clone();
-    let powered = level.is_some_and(|level| level.has_neighbor_signal(&*host, pos));
-    if state.tick(powered)
+    let signal = Signal::of(level.is_some_and(|level| level.has_neighbor_signal(&*host, pos)));
+    if state.tick(signal)
         && let Some(level) = level
     {
         fire_beam(host, level, pos, &mut state);
@@ -795,29 +800,36 @@ fn convert_items(
         if items == 0 {
             continue;
         }
-        if convert_item(host, level, entity, item, stack, &recipe, items) {
-            state.spend(
-                recipe
-                    .energy
-                    .saturating_mul(i32::try_from(items).unwrap_or(i32::MAX)),
-            );
+        let found = ScannedItem {
+            entity,
+            item,
+            stack,
+        };
+        if convert_item(host, level, found, &recipe, items, state) {
             return;
         }
     }
 }
 
-/// One dropped item's conversion: the recipe's result at `items` copies (upstream overwrites the
-/// result's own count with it), the input entity keeping what is left of the stack. A whole-stack
-/// conversion rewrites the entity in place; a partial one leaves the remainder on it and spawns the
-/// output beside it, which is what upstream's discard-and-respawn pair amounts to.
-fn convert_item(
-    host: &mut dyn ServerHost,
-    level: LevelRef,
+/// One dropped item the beam's box holds: the entity (for its position), the item entity (for its
+/// stack write) and the stack it carried when it was scanned.
+struct ScannedItem {
     entity: mod_api::EntityRef,
     item: mod_api::ItemEntityRef,
     stack: ItemStack,
+}
+
+/// One dropped item's conversion: the recipe's result at `items` copies (upstream overwrites the
+/// result's own count with it), the input entity keeping what is left of the stack. The writes go
+/// in [`convert`]'s order — the input gives up its converted copies, then the result appears, then
+/// the price — so a host that refuses the spawn gets its stack back instead of losing items.
+fn convert_item(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    found: ScannedItem,
     recipe: &LaserRecipe,
     items: u32,
+    state: &mut Reconstructor,
 ) -> bool {
     let result_json = recipe.result.to_string();
     let Some(result) = host.recipe_result(&result_json).ok().flatten() else {
@@ -827,39 +839,97 @@ fn convert_item(
     if output.set_count(items).is_err() {
         return false;
     }
-    let Some(position) = entity.position(&*host) else {
+    let Some(position) = found.entity.position(&*host) else {
         return false;
     };
-    match stack.shrink(items) {
-        // The whole stack converts: the entity becomes the result.
-        None => {
-            if !item.set_stack(host, output).unwrap_or(false) {
-                return false;
+    let original = found.stack.clone();
+    let remainder = found.stack.shrink(items);
+    let mut conversion = ItemConversion {
+        host,
+        level,
+        entity: found.entity,
+        item: found.item,
+        position,
+        original,
+        remainder,
+        output,
+        replaced: false,
+    };
+    let price = recipe
+        .energy
+        .saturating_mul(i32::try_from(items).unwrap_or(i32::MAX));
+    convert(&mut conversion, price, state)
+}
+
+/// The item half of one conversion, as the three writes [`convert`] orders. A whole-stack
+/// conversion rewrites the entity in place (upstream discards it and spawns the result); a partial
+/// one leaves the remainder on the entity and drops the output beside it, and puts the whole stack
+/// back if that drop is refused.
+struct ItemConversion<'a> {
+    host: &'a mut dyn ServerHost,
+    level: LevelRef,
+    /// The entity the beam found, which carries [`CONVERTED_MARKER`] once it holds the result.
+    entity: mod_api::EntityRef,
+    item: mod_api::ItemEntityRef,
+    position: [f64; 3],
+    /// The stack the entity held, for the retraction.
+    original: ItemStack,
+    /// What the entity keeps; `None` when the whole stack converts and the entity becomes the result.
+    remainder: Option<ItemStack>,
+    output: ItemStack,
+    /// `remove_source` wrote the result itself, so there is nothing left to emit.
+    replaced: bool,
+}
+
+impl Conversion for ItemConversion<'_> {
+    fn remove_source(&mut self) -> bool {
+        match self.remainder.take() {
+            None => {
+                let wrote = self
+                    .item
+                    .set_stack(&mut *self.host, self.output.clone())
+                    .unwrap_or(false);
+                self.replaced = wrote;
+                wrote
             }
-            entity.add_tag(host, CONVERTED_MARKER);
-            true
+            Some(remainder) => self
+                .item
+                .set_stack(&mut *self.host, remainder)
+                .unwrap_or(false),
         }
-        // Some of it stays: the entity keeps the remainder, the result joins it.
-        Some(remainder) => {
-            if !item.set_stack(host, remainder).unwrap_or(false) {
-                return false;
-            }
-            let spawned = level
-                .spawn_item(
-                    host,
-                    position[0],
-                    position[1],
-                    position[2],
-                    output,
-                    CONVERTED_PICKUP_DELAY,
-                )
-                .ok()
-                .flatten();
-            if let Some(spawned) = spawned {
-                spawned.add_tag(host, CONVERTED_MARKER);
-            }
-            true
+    }
+
+    fn emit_result(&mut self) -> bool {
+        if self.replaced {
+            // The entity holds the result itself: mark it so a later beam step (whose box has
+            // grown) cannot convert it again.
+            self.entity.add_tag(&mut *self.host, CONVERTED_MARKER);
+            return true;
         }
+        let spawned = self
+            .level
+            .spawn_item(
+                &mut *self.host,
+                self.position[0],
+                self.position[1],
+                self.position[2],
+                self.output.clone(),
+                CONVERTED_PICKUP_DELAY,
+            )
+            .ok()
+            .flatten();
+        let Some(spawned) = spawned else {
+            return false;
+        };
+        spawned.add_tag(&mut *self.host, CONVERTED_MARKER);
+        true
+    }
+
+    fn restore_source(&mut self) {
+        if self.replaced {
+            return;
+        }
+        let _ = self.item.set_stack(&mut *self.host, self.original.clone());
     }
 }
 
@@ -886,50 +956,105 @@ fn convert_plane(
         if !state.can_afford(recipe.energy) {
             continue;
         }
-        if apply_conversion(host, level, at, &recipe) {
-            state.spend(recipe.energy);
-        }
+        apply_conversion(host, level, at, &recipe, state);
     }
 }
 
-/// One conversion: a block result is placed, any other result is dropped as an item at the
-/// block's centre and the block becomes air (upstream's `BlockItem` branch and its else).
+/// One block's conversion. A block result replaces the source in a single write (upstream's
+/// `BlockItem` branch); any other result is dropped as an item at the block's centre after the
+/// source block is gone, and the block is put back if the drop is refused. Upstream spawns the
+/// result first and ignores `removeBlock`'s answer, which can leave both the input block and its
+/// output in the world (notes.md, "Upstream defects fixed").
 fn apply_conversion(
     host: &mut dyn ServerHost,
     level: LevelRef,
     at: [i32; 3],
     recipe: &LaserRecipe,
-) -> bool {
+    state: &mut Reconstructor,
+) {
     let result_json = recipe.result.to_string();
     let Some(result) = host.recipe_result(&result_json).ok().flatten() else {
-        return false;
+        return;
     };
     if result.count() == 0 {
-        return false;
+        return;
     }
-    if let Some(block) = host.item_block(result.item()) {
-        let Some(state) = host.block_state_default(block) else {
-            return false;
-        };
-        return level
-            .set_block(host, at, state, BlockUpdateFlags::CLIENTS)
-            .unwrap_or(false);
-    }
+    let original = level.block_state(&*host, at);
     let centre = [
         f64::from(at[0]) + 0.5,
         f64::from(at[1]) + 0.5,
         f64::from(at[2]) + 0.5,
     ];
-    if level
-        .spawn_item(host, centre[0], centre[1], centre[2], result, 10)
-        .ok()
-        .flatten()
-        .is_none()
-    {
-        return false;
+    let mut conversion = BlockConversion {
+        host,
+        level,
+        at,
+        original,
+        result,
+        centre,
+        replaced: false,
+    };
+    let _ = convert(&mut conversion, recipe.energy, state);
+}
+
+/// The block half of one conversion, as the three writes [`convert`] orders.
+struct BlockConversion<'a> {
+    host: &'a mut dyn ServerHost,
+    level: LevelRef,
+    at: [i32; 3],
+    /// The state the source was in, so a refused drop can put it back.
+    original: Option<BlockState>,
+    result: ItemStack,
+    centre: [f64; 3],
+    /// `remove_source` placed the result over the source, so there is nothing left to emit.
+    replaced: bool,
+}
+
+impl Conversion for BlockConversion<'_> {
+    fn remove_source(&mut self) -> bool {
+        if let Some(block) = self.host.item_block(self.result.item()) {
+            let Some(state) = self.host.block_state_default(block) else {
+                return false;
+            };
+            let placed = self
+                .level
+                .set_block(&mut *self.host, self.at, state, BlockUpdateFlags::CLIENTS)
+                .unwrap_or(false);
+            self.replaced = placed;
+            return placed;
+        }
+        self.level.remove_block(&mut *self.host, self.at, false)
     }
-    level.remove_block(host, at, false);
-    true
+
+    fn emit_result(&mut self) -> bool {
+        if self.replaced {
+            return true;
+        }
+        self.level
+            .spawn_item(
+                &mut *self.host,
+                self.centre[0],
+                self.centre[1],
+                self.centre[2],
+                self.result.clone(),
+                10,
+            )
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    fn restore_source(&mut self) {
+        if self.replaced {
+            return;
+        }
+        let Some(state) = self.original else {
+            return;
+        };
+        let _ = self
+            .level
+            .set_block(&mut *self.host, self.at, state, BlockUpdateFlags::CLIENTS);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,11 +1187,28 @@ pub(crate) fn machine_click(
     Some(InteractionResult::Success)
 }
 
-/// A right click on the reconstructor. Upstream fills its lens slot from a hand holding an
-/// `ILensItem` and hands a lens back on the same-item click; **no item in this package is a lens**
-/// (1.3.26's only lens source is the reconstructor's own four-recipe lens cycle, which needs a
-/// lens to start), so the slot can never be filled and every held item is refused. An empty hand
-/// reads the status line, as on the other two machines: this slice has no GUI
+/// The item upstream's `redstoneConfigurator` config names by default (`CommonConfig.Other`:
+/// `.define("redstoneConfigurator", "minecraft:redstone_torch")`). This port has no config surface,
+/// so the default is the one it accepts; the jar's own wrench is `actuallyadditions:laser_wrench`,
+/// whose `useOn` links laser relays — a family this package does not ship (notes.md).
+const REDSTONE_CONFIGURATOR: &str = "minecraft:redstone_torch";
+
+/// The mode line upstream's HUD draws (`info.actuallyadditions.redstoneMode` and its `.pulse` /
+/// `.deactivation` values).
+fn redstone_mode_line(pulse: bool) -> String {
+    format!(
+        "Redstone Mode: {}",
+        if pulse { "Pulse" } else { "Deactivation" }
+    )
+}
+
+/// A right click on the reconstructor. A hand holding the redstone configurator flips the pulse
+/// mode (`BlockContainerBase.tryToggleRedstone`) and the click is claimed, so the torch is never
+/// placed. Upstream otherwise fills its lens slot from a hand holding an `ILensItem` and hands a
+/// lens back on the same-item click; **no item in this package is a lens** (1.3.26's only lens
+/// source is the reconstructor's own four-recipe lens cycle, which needs a lens to start), so the
+/// slot can never be filled and every other held item is refused. An empty hand reads the status
+/// line, as on the other two machines: this slice has no GUI
 /// (`blocked(no-single-player-mod-screen)`).
 pub(crate) fn reconstructor_click(
     host: &mut dyn ServerHost,
@@ -1077,6 +1219,16 @@ pub(crate) fn reconstructor_click(
     if block_id(&*host, level, click.pos).as_deref() != Some(RECONSTRUCTOR) {
         return None;
     }
+    if let Some(stack) = held.filter(|stack| stack.count() > 0)
+        && item_id(&*host, stack) == REDSTONE_CONFIGURATOR
+    {
+        if let Some(pulse) = toggle_pulse(host, level, click.pos)
+            && let Some(player) = host.player(click.player)
+        {
+            let _ = player.action_bar(host, Text::literal(redstone_mode_line(pulse)));
+        }
+        return Some(InteractionResult::Success);
+    }
     let line = match held.filter(|stack| stack.count() > 0) {
         Some(stack) => format!("{} is not a lens", item_id(&*host, stack)),
         None => status_line(host, click.pos),
@@ -1085,6 +1237,22 @@ pub(crate) fn reconstructor_click(
         let _ = player.action_bar(host, Text::literal(line));
     }
     Some(InteractionResult::Success)
+}
+
+/// `BlockContainerBase.tryToggleRedstone` on the server: flip the mode and write it back through the
+/// block entity's own saved data (`setChanged` + `sendUpdate` are `replace_data`'s own path). Answers
+/// the mode the machine is in now; `None` when the block entity cannot be read.
+fn toggle_pulse(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<bool> {
+    let entity = host.block_entity(level, pos)?;
+    let mut saved = Tag::Compound(entity.data(&*host)?);
+    let mut state = read_reconstructor(&saved);
+    state.pulse = !state.pulse;
+    write_reconstructor(&mut saved, &state);
+    let Tag::Compound(nbt) = saved else {
+        return None;
+    };
+    entity.replace_data(host, nbt).ok()?;
+    Some(state.pulse)
 }
 
 /// Insert as much of the held stack as the input slot takes, and take exactly that from the hand,
@@ -1182,7 +1350,7 @@ const GENERATOR_STATE_KEYS: [&str; 3] = ["energy", "burn", "burn_max"];
 const CRUSHER_STATE_KEYS: [&str; 2] = ["energy", "progress"];
 /// The saved values a reconstructor's item carries: its buffer (upstream's loot copies the
 /// `actuallyadditions:energy` component and not the cycle, which is sync-only there).
-const RECONSTRUCTOR_STATE_KEYS: [&str; 1] = ["energy"];
+const RECONSTRUCTOR_STATE_KEYS: [&str; 2] = ["energy", "pulse"];
 
 /// The machines' own items, resolved once at registration. `block_drops` runs with a read-only
 /// [`LevelHost`], which cannot name an item, so the drop is matched against the key registration
@@ -1306,7 +1474,8 @@ impl ItemPart for MachineItemPart {
             }
             Some(RECONSTRUCTOR) => {
                 let current = read_reconstructor(&saved);
-                let restored = restored_reconstructor(current.energy, current.cycle as i32);
+                let restored =
+                    restored_reconstructor(current.energy, current.cycle as i32, current.pulse);
                 if restored != current {
                     write_reconstructor(&mut saved, &restored);
                     true
@@ -1967,11 +2136,23 @@ mod tests {
         let state = Reconstructor {
             energy: 1_040,
             cycle: 37,
+            pulse: true,
+            signal: Signal::On,
         };
         write_reconstructor(&mut saved, &state);
         assert_eq!(read_reconstructor(&saved), state);
         assert_eq!(saved.get("energy"), Some(&Tag::Int(1_040)));
         assert_eq!(saved.get("cycle"), Some(&Tag::Int(37)));
+        assert_eq!(
+            saved.get("pulse"),
+            Some(&Tag::Int(1)),
+            "upstream's isPulseMode, as the port's ints"
+        );
+        assert_eq!(
+            saved.get("redstone"),
+            Some(&Tag::Int(1)),
+            "upstream's isRedstonePowered, so an edge is not seen twice"
+        );
         set_int(&mut saved, "energy", RECONSTRUCTOR_CAPACITY + 1);
         assert_eq!(
             read_reconstructor(&saved).energy,
@@ -1982,9 +2163,10 @@ mod tests {
 
     #[test]
     fn the_reconstructor_line_is_the_one_the_e2e_asserts() {
-        let state = Reconstructor {
+        let mut state = Reconstructor {
             energy: 1_040,
             cycle: 63,
+            ..Reconstructor::new()
         };
         assert_eq!(
             reconstructor_line(
@@ -1995,20 +2177,29 @@ mod tests {
                 None,
                 123
             ),
-            "Atomic Reconstructor at 10,100,0: 1040/300000 CF (comparator 0, facing east, cycle \
-             63/100, lens default, sight minecraft:redstone_wire -> \
+            "Atomic Reconstructor at 10,100,0: 1040/300000 CF (comparator 0, facing east, pulse \
+             off, cycle 63/100, lens default, sight minecraft:redstone_wire -> \
              actuallyadditions:restonia_crystal @ 40 CF, t=123)"
+        );
+        state.pulse = true;
+        assert!(
+            reconstructor_line([10, 100, 0], &state, Some("east"), "nothing", None, 123)
+                .contains("pulse on"),
+            "the readout names the mode: {}",
+            reconstructor_line([10, 100, 0], &state, Some("east"), "nothing", None, 123)
         );
     }
 
     #[test]
-    fn the_reconstructors_drop_carries_its_buffer_and_not_its_cycle() {
+    fn the_reconstructors_drop_carries_its_buffer_and_its_mode_and_not_its_cycle() {
         let mut saved = compound();
         write_reconstructor(
             &mut saved,
             &Reconstructor {
                 energy: 5_000,
                 cycle: 12,
+                pulse: true,
+                signal: Signal::On,
             },
         );
         let Tag::Compound(nbt) = &saved else {
@@ -2024,9 +2215,19 @@ mod tests {
         };
         assert_eq!(payload.get("energy"), Some(&Tag::Int(5_000)));
         assert_eq!(
+            payload.get("pulse"),
+            Some(&Tag::Int(1)),
+            "upstream's loot copies its PULSE_MODE component, so the toggle survives a break"
+        );
+        assert_eq!(
             payload.get("cycle"),
             None,
-            "upstream's loot copies the energy component only; the cycle is sync-only there"
+            "upstream's loot copies the energy and the mode only; the cycle is sync-only there"
+        );
+        assert_eq!(
+            payload.get("redstone"),
+            None,
+            "a signal level belongs to the world, not to a picked-up machine"
         );
         assert_eq!(
             payload.get("id"),

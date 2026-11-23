@@ -1,8 +1,8 @@
-# Actually Additions → Horizon (slices 1–6)
+# Actually Additions → Horizon (slices 1–7)
 
 The **Coal Generator**, the **Crusher** and the **Atomic Reconstructor** of Actually Additions
 1.3.26 (`Ellpeck/ActuallyAdditions`, **MIT**) as one flat SDK package (mod API `0.2`, version
-`0.2.7`), built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` and
+`0.2.8`), built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` and
 mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` for Minecraft 26.3.
 
 - [`FINDINGS.md`](FINDINGS.md) — upstream behaviour read from the source, the slice boundary and
@@ -42,10 +42,12 @@ mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` for Minecraft 26.3.
 | Atomic Reconstructor results | a `laser/` recipe's block result is placed, an item result is dropped | the same (redstone dust → Restonia Crystal, sands → soul sand, red mushroom → nether wart ship) |
 | The crystal chain | `restonia_crystal` from the beam, then the Crusher's recipe | the crystal ships, the Crusher's own recipe now crafts, and `tools/recipe-blockers.json` is empty |
 | The beam's item half | `invokeConversionLens` also converts the dropped items in the box from the machine to the block it hit, as many as the buffer pays for, marking each result `aa_cnv` | the same: a dropped redstone becomes a Restonia Crystal (count conserved), one entity per beam step, the remainder of a stack stays convertible, and all six facings work (upstream's box is inverted on three of them) |
+| A conversion's order | the result is spawned first, then the source is removed with `removeBlock`'s answer ignored; the energy is charged anyway | the source goes first and its answer is checked, the result arrives only if it did (or the source is put back), and the recipe's energy is charged only when the conversion happened — in the block half and the item half |
+| Redstone mode | `isPulseMode`: a rising edge of `getBestNeighborSignal` fires one shot, and the cycle never free-runs; a click with the config's `redstoneConfigurator` (default a redstone torch) toggles it, and the mode travels on the broken item | the same: a `pulse on/off` field in the `/actuallyadditions info` line, one shot per rising edge, the cycle frozen in pulse mode, the flag in the drop's payload |
 
 Not ported, and recorded as gaps in [`notes.md`](notes.md): the GUI
-(`blocked(no-single-player-mod-screen)`), the Double Crusher and the other ~44 machines, redstone
-control (a redstone block freezes the reconstructor's cycle but there is no pulse mode or wrench), a
+(`blocked(no-single-player-mod-screen)`), the Double Crusher and the other ~44 machines, the rest of
+redstone control (only the reconstructor toggles; the generator and the crusher do not), a
 relay/cable, the Empowerer and the empowered crystals, lens items
 (1.3.26's only lens source is the reconstructor's own four-recipe lens cycle, which needs a lens to
 start), the ore's generation (`blocked(configured-feature-not-registered)`), the booklet,
@@ -54,7 +56,7 @@ start), the ore's generation (`blocked(configured-feature-not-registered)`), the
 ## Quick checks
 
 ```sh
-cargo test --offline                                       # 50 tests: 20 runtime, 11 reconstructor, 19 glue
+cargo test --offline                                       # 56 tests: 20 runtime, 17 reconstructor (pulse + conversion), 19 glue
 cargo clippy --all-targets --offline -- -D warnings         # 0 warnings
 cargo fmt --check                                          # not --all: that checks the fetched SDK
 cargo horizon-mod build                                    # keep Cargo.lock in the tree (declares serde_json)
@@ -64,7 +66,7 @@ cargo horizon-mod fits actuallyadditions.hmod --build 0b14f8a   # a different bu
 python3 tools/check_recipe_keys.py                          # every recipe key resolves, or is a recorded blocker
 ports/tools/launcher-game.sh build actuallyadditions        # the launcher compiles the package into a game
 eval "$(ports/tools/launcher-game.sh env actuallyadditions)" && tools/e2e.sh
-                # SELFTEST=1, drops, ore, laser, item and NEGATIVE=1 must fail
+                # SELFTEST=1, drops, ore, laser, item, pulse and NEGATIVE=1 must fail
 ```
 
 Local-only until the maintainer approves publishing (ARCHITECTURE.md §8); the artifact goes to a

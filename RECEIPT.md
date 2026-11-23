@@ -1,11 +1,11 @@
-# Package receipt — actuallyadditions 0.2.7
+# Package receipt — actuallyadditions 0.2.8
 
 | field | value |
 |---|---|
-| version | `0.2.7` |
+| version | `0.2.8` |
 | file | `actuallyadditions.hmod` |
-| bytes | 145,399 |
-| sha256 | `7d35fc805d9e49c05d2cc4e30a1a5f1cc261da0a6d0bf6d3b18b8a5d909bc5e4` |
+| bytes | 150,252 |
+| sha256 | `5440228fe6a14f9fa35fedd6efe924c1c099a1d5832f466fb6d2438daf123097` |
 | source | this tag — the tree here is the source that produced the archive |
 | game | 26.3 |
 | horizon | `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` |

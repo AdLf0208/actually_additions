@@ -578,12 +578,36 @@ pub fn reconstructor_comparator(energy: i32) -> i32 {
     (energy.max(0) / RECONSTRUCTOR_COMPARATOR_STEP).clamp(0, 15)
 }
 
-/// The Atomic Reconstructor's saved state: its CF buffer and the position in its cycle
-/// (`TileEntityAtomicReconstructor`'s `Energy` and `CurrentTime`).
+/// The redstone level a machine sees this tick: `getBestNeighborSignal(pos) > 0`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Signal {
+    /// No neighbour drives the machine.
+    #[default]
+    Off,
+    /// A neighbour drives the machine.
+    On,
+}
+
+impl Signal {
+    /// The level of a `has_neighbor_signal` answer.
+    #[must_use]
+    pub fn of(powered: bool) -> Self {
+        if powered { Self::On } else { Self::Off }
+    }
+}
+
+/// The Atomic Reconstructor's saved state: its CF buffer, the position in its cycle
+/// (`TileEntityAtomicReconstructor`'s `Energy` and `CurrentTime`), upstream's `isPulseMode` and the
+/// signal its last tick saw (`TileEntityBase`'s `isRedstonePowered`, which is what makes an edge an
+/// edge).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Reconstructor {
     pub energy: i32,
     pub cycle: u32,
+    /// Upstream's `isPulseMode`: one shot per rising edge instead of a free-running cycle.
+    pub pulse: bool,
+    /// The level the previous tick read, so a rising edge can be told from a level.
+    pub signal: Signal,
 }
 
 impl Reconstructor {
@@ -593,11 +617,20 @@ impl Reconstructor {
         Self::default()
     }
 
-    /// One server tick. A redstone-powered machine does not advance and does not shoot.
-    /// Returns true on the tick the cycle reaches zero, when upstream calls
-    /// `invokeReconstructor`.
-    pub fn tick(&mut self, powered: bool) -> bool {
-        if powered {
+    /// One server tick. Returns true when the machine fires now.
+    ///
+    /// Upstream `TileEntityAtomicReconstructor.serverTick` runs the cycle only under
+    /// `!isRedstonePowered && !isPulseMode`, so a powered machine freezes and a pulse-mode one
+    /// never runs its cycle at all; `BlockContainerBase.updateRedstoneState` calls
+    /// `activateOnPulse` on a rising edge while `respondsToPulses()`
+    /// (`isRedstoneToggle() && isPulseMode`).
+    pub fn tick(&mut self, signal: Signal) -> bool {
+        let rose = signal == Signal::On && self.signal == Signal::Off;
+        self.signal = signal;
+        if self.pulse {
+            return rose;
+        }
+        if signal == Signal::On {
             return false;
         }
         if self.cycle > 0 {
@@ -633,11 +666,48 @@ impl Reconstructor {
 /// What a placed reconstructor comes back with: its buffer clamped and its cycle inside the
 /// machine's own range (a stale item can name any int).
 #[must_use]
-pub fn restored_reconstructor(energy: i32, cycle: i32) -> Reconstructor {
+pub fn restored_reconstructor(energy: i32, cycle: i32, pulse: bool) -> Reconstructor {
     Reconstructor {
         energy: clamp_energy(energy, RECONSTRUCTOR_CAPACITY),
         cycle: (cycle.max(0) as u32).min(RECONSTRUCTOR_TICKS),
+        pulse,
+        signal: Signal::Off,
     }
+}
+
+/// The world writes one conversion makes. The block half and the item half each implement it over
+/// the level; the unit tests supply a fake that can refuse either write.
+///
+/// The order is the point: upstream's `invokeConversionLens` spawns the result **before** it removes
+/// the source block and ignores `removeBlock`'s answer, so a host that refuses the removal leaves
+/// both the input and its output in the world.
+pub trait Conversion {
+    /// Take the source out of the world: the block (replaced by a block result in the same write),
+    /// or the item stack's converted copies. False when the host refused it, with the world as it was.
+    fn remove_source(&mut self) -> bool;
+
+    /// Put the result in the world. For a result `remove_source` already wrote (a block placed over
+    /// the source, a whole stack rewritten in place) this is a no-op that reports success.
+    fn emit_result(&mut self) -> bool;
+
+    /// Put back what [`Conversion::remove_source`] removed, after a refused
+    /// [`Conversion::emit_result`], so the world never holds neither. Does nothing when
+    /// `remove_source` wrote the result itself.
+    fn restore_source(&mut self);
+}
+
+/// One conversion: the source goes first, the result arrives only if it did, and the recipe's own
+/// energy is owed only when both happened. Returns whether the conversion happened.
+pub fn convert(source: &mut impl Conversion, energy: i32, state: &mut Reconstructor) -> bool {
+    if !source.remove_source() {
+        return false;
+    }
+    if !source.emit_result() {
+        source.restore_source();
+        return false;
+    }
+    state.spend(energy);
+    true
 }
 
 /// `Block.getStateForPlacement` for upstream's `FullyDirectionalBlock`:
@@ -772,8 +842,12 @@ mod reconstructor_tests {
         let mut reconstructor = Reconstructor {
             energy: 1_040,
             cycle: 1,
+            ..Reconstructor::new()
         };
-        assert!(reconstructor.tick(false), "the cycle reaches 0 and fires");
+        assert!(
+            reconstructor.tick(Signal::Off),
+            "the cycle reaches 0 and fires"
+        );
         assert_eq!(
             reconstructor.fire(),
             Some(40),
@@ -793,8 +867,9 @@ mod reconstructor_tests {
         let mut short = Reconstructor {
             energy: 1_039,
             cycle: 1,
+            ..Reconstructor::new()
         };
-        assert!(short.tick(false));
+        assert!(short.tick(Signal::Off));
         assert_eq!(short.fire(), Some(39));
         assert!(
             !short.can_afford(40),
@@ -804,21 +879,22 @@ mod reconstructor_tests {
         let mut empty = Reconstructor {
             energy: 0,
             cycle: 1,
+            ..Reconstructor::new()
         };
-        assert!(empty.tick(false));
+        assert!(empty.tick(Signal::Off));
         assert_eq!(empty.fire(), None, "under 1000 CF the shot does not go out");
     }
 
     #[test]
     fn the_cycle_is_about_a_hundred_ticks() {
         let mut reconstructor = Reconstructor::new();
-        assert!(!reconstructor.tick(false));
+        assert!(!reconstructor.tick(Signal::Off));
         assert_eq!(reconstructor.cycle, RECONSTRUCTOR_TICKS);
         for _ in 1..RECONSTRUCTOR_TICKS {
-            assert!(!reconstructor.tick(false));
+            assert!(!reconstructor.tick(Signal::Off));
         }
         assert_eq!(reconstructor.cycle, 1);
-        assert!(reconstructor.tick(false), "the hundredth tick fires");
+        assert!(reconstructor.tick(Signal::Off), "the hundredth tick fires");
         assert_eq!(reconstructor.cycle, 0);
     }
 
@@ -827,12 +903,200 @@ mod reconstructor_tests {
         let mut reconstructor = Reconstructor {
             energy: 5_000,
             cycle: 50,
+            ..Reconstructor::new()
         };
         for _ in 0..20 {
-            assert!(!reconstructor.tick(true), "a powered machine does not fire");
+            assert!(
+                !reconstructor.tick(Signal::On),
+                "a powered machine does not fire"
+            );
         }
         assert_eq!(reconstructor.cycle, 50, "the cycle does not advance");
         assert_eq!(reconstructor.energy, 5_000);
+    }
+
+    /// Upstream's `isPulseMode`: `serverTick` only runs the cycle under
+    /// `!isRedstonePowered && !isPulseMode`, so a toggle-mode machine never free-runs.
+    #[test]
+    fn a_pulse_mode_machine_never_runs_its_cycle() {
+        let mut reconstructor = Reconstructor {
+            energy: 5_000,
+            cycle: 50,
+            pulse: true,
+            ..Reconstructor::new()
+        };
+        for _ in 0..20 {
+            assert!(
+                !reconstructor.tick(Signal::Off),
+                "no cycle shot in pulse mode"
+            );
+        }
+        assert_eq!(reconstructor.cycle, 50, "the cycle does not advance");
+        assert_eq!(reconstructor.energy, 5_000);
+    }
+
+    /// `BlockContainerBase.updateRedstoneState` calls `activateOnPulse` on the rising edge of
+    /// `getBestNeighborSignal(pos) > 0`, and only while `respondsToPulses()`.
+    #[test]
+    fn a_pulse_mode_machine_fires_once_for_each_rising_edge() {
+        let mut reconstructor = Reconstructor {
+            energy: 5_000,
+            cycle: 50,
+            pulse: true,
+            ..Reconstructor::new()
+        };
+        assert!(!reconstructor.tick(Signal::Off), "a low signal is no edge");
+        assert!(reconstructor.tick(Signal::On), "the rising edge fires");
+        assert!(
+            !reconstructor.tick(Signal::On),
+            "the level does not fire again"
+        );
+        assert!(!reconstructor.tick(Signal::On));
+        assert!(
+            !reconstructor.tick(Signal::Off),
+            "the falling edge fires nothing"
+        );
+        assert!(
+            reconstructor.tick(Signal::On),
+            "the second rising edge fires"
+        );
+        assert_eq!(
+            reconstructor.cycle, 50,
+            "pulse mode never touches the cycle"
+        );
+    }
+
+    /// The control: without the toggle the same rising edge does nothing and the cycle freezes,
+    /// which is upstream's `!isRedstonePowered` branch and this port's pre-0.2.8 behaviour.
+    #[test]
+    fn a_machine_without_pulse_mode_never_fires_on_an_edge() {
+        let mut reconstructor = Reconstructor {
+            energy: 5_000,
+            cycle: 50,
+            ..Reconstructor::new()
+        };
+        for _ in 0..20 {
+            assert!(
+                !reconstructor.tick(Signal::On),
+                "a frozen machine never fires"
+            );
+        }
+        assert_eq!(reconstructor.cycle, 50);
+        assert!(!reconstructor.tick(Signal::Off));
+        assert_eq!(
+            reconstructor.cycle, 49,
+            "the cycle resumes when the signal drops"
+        );
+    }
+
+    /// The world writes one conversion makes, in the order [`convert`] requires.
+    #[derive(Debug)]
+    struct FakeConversion {
+        source: bool,
+        result: bool,
+        refuse_removal: bool,
+        refuse_result: bool,
+        restores: usize,
+    }
+
+    impl FakeConversion {
+        fn new() -> Self {
+            Self {
+                source: true,
+                result: false,
+                refuse_removal: false,
+                refuse_result: false,
+                restores: 0,
+            }
+        }
+    }
+
+    impl Conversion for FakeConversion {
+        fn remove_source(&mut self) -> bool {
+            if self.refuse_removal {
+                return false;
+            }
+            self.source = false;
+            true
+        }
+
+        fn emit_result(&mut self) -> bool {
+            if self.refuse_result {
+                return false;
+            }
+            self.result = true;
+            true
+        }
+
+        fn restore_source(&mut self) {
+            self.restores += 1;
+            self.source = true;
+        }
+    }
+
+    /// The review's refused-removal path: the host refuses to take the source, so no result may
+    /// appear and the recipe's energy must stay in the buffer.
+    #[test]
+    fn a_refused_removal_leaves_no_result_and_charges_nothing() {
+        let mut state = Reconstructor {
+            energy: 1_040,
+            cycle: 0,
+            ..Reconstructor::new()
+        };
+        let mut world = FakeConversion {
+            refuse_removal: true,
+            ..FakeConversion::new()
+        };
+        assert!(!convert(&mut world, 40, &mut state));
+        assert!(world.source, "the source is still in the world");
+        assert!(
+            !world.result,
+            "a refused removal must not leave the output too"
+        );
+        assert_eq!(world.restores, 0, "nothing was taken, nothing to put back");
+        assert_eq!(
+            state.energy, 1_040,
+            "a conversion that did not happen is free"
+        );
+    }
+
+    /// The success path: both writes happened, so the recipe's energy is owed — once.
+    #[test]
+    fn a_conversion_charges_once_after_both_writes() {
+        let mut state = Reconstructor {
+            energy: 1_040,
+            cycle: 0,
+            ..Reconstructor::new()
+        };
+        let mut world = FakeConversion::new();
+        assert!(convert(&mut world, 40, &mut state));
+        assert!(!world.source, "the source went");
+        assert!(world.result, "the result arrived");
+        assert_eq!(state.energy, 1_000, "the recipe's 40 CF, charged once");
+        assert_eq!(world.restores, 0);
+    }
+
+    /// The third hazard: the source went but the result could not be made. Put the source back and
+    /// owe nothing, so the world never holds neither (or both).
+    #[test]
+    fn a_refused_result_puts_the_source_back_and_charges_nothing() {
+        let mut state = Reconstructor {
+            energy: 1_040,
+            cycle: 0,
+            ..Reconstructor::new()
+        };
+        let mut world = FakeConversion {
+            refuse_result: true,
+            ..FakeConversion::new()
+        };
+        assert!(!convert(&mut world, 40, &mut state));
+        assert!(world.source, "the source is back");
+        assert!(!world.result);
+        assert_eq!(world.restores, 1, "the removal was undone exactly once");
+        assert_eq!(
+            state.energy, 1_040,
+            "a conversion that did not finish is free"
+        );
     }
 
     #[test]
@@ -1060,22 +1324,26 @@ mod reconstructor_tests {
     }
 
     #[test]
-    fn a_restored_reconstructor_is_clamped_into_its_buffer_and_cycle() {
+    fn a_restored_reconstructor_is_clamped_into_its_buffer_cycle_and_mode() {
         assert_eq!(
-            restored_reconstructor(5_000, 40),
+            restored_reconstructor(5_000, 40, true),
             Reconstructor {
                 energy: 5_000,
-                cycle: 40
+                cycle: 40,
+                pulse: true,
+                ..Reconstructor::new()
             }
         );
         assert_eq!(
-            restored_reconstructor(400_000, 900),
+            restored_reconstructor(400_000, 900, false),
             Reconstructor {
                 energy: RECONSTRUCTOR_CAPACITY,
-                cycle: RECONSTRUCTOR_TICKS
+                cycle: RECONSTRUCTOR_TICKS,
+                ..Reconstructor::new()
             }
         );
-        assert_eq!(restored_reconstructor(-1, -7), Reconstructor::new());
+        // A stale item can name any int, but the buffer, the cycle and the mode come back in range.
+        assert_eq!(restored_reconstructor(-1, -7, false), Reconstructor::new());
     }
 }
 
