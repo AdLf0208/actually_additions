@@ -3,6 +3,8 @@
   "icon": "actuallyadditions:coal_generator",
   "items": [
     "actuallyadditions:coal_generator",
-    "actuallyadditions:crusher"
+    "actuallyadditions:crusher",
+    "actuallyadditions:iron_casing",
+    "actuallyadditions:basic_coil"
   ]
 }

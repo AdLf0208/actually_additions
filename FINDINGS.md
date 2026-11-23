@@ -121,6 +121,32 @@ Machines seen upstream, for planning — **not** in slice 1 or 2:
 - Also: booklet/Patchouli guide, lenses, drills/weapons/armour, crystal ore
   worldgen, `Atomic Reconstructor` conversions, config, JEI integration.
 
+## The crafting chain (`BlockRecipeGenerator.java`, the jar's recipes)
+
+Upstream's machine recipes are shaped and use convention tags. Read from
+`src/generated/resources/data/actuallyadditions/recipe/` and from the jar:
+
+| Recipe | Shape | Keys | Slice |
+|---|---|---|---|
+| `coal_generator` | `CIC / CAC / CIC` | `C` = `#c:cobblestones`, `I` = `actuallyadditions:iron_casing`, `A` = `minecraft:coal` | **crafts (0.2.4)** |
+| `crusher` | `RFC / BIB / CFR` | `R` = `actuallyadditions:restonia_crystal`, `F` = `minecraft:flint`, `C` = `#c:cobblestones`, `B` = `actuallyadditions:basic_coil`, `I` = `actuallyadditions:iron_casing` | `blocked(restonia_crystal_growth)` — `restonia_crystal` is grown, not crafted |
+| `iron_casing` | `WSW / SQS / WSW` | `W` = `#c:ingots/iron`, `S` = `#c:rods/wooden`, `Q` = `actuallyadditions:black_quartz` | not carried: `black_quartz` needs the worldgen ore |
+| `basic_coil` | `_R_ / RIR / _R_` | `R` = `actuallyadditions:restonia_crystal`, `I` = `actuallyadditions:black_quartz` | not carried: both inputs are grown/found, not craftable |
+
+`iron_casing` is a **block** upstream (`ActuallyBlocks.IRON_CASING`: `Blocks.STONE`
+copied, `strength(1.5f, 10f)`, `SoundType.METAL`; in `minecraft:mineable/pickaxe`),
+with a `cube_all` model on its own texture and a loot table that drops itself; its
+item model parents the block model. `basic_coil` is a plain item
+(`assets/actuallyadditions/models/item/basic_coil.json`, `item/generated`). The
+`c:` names are NeoForge convention tags; NeoForge 1.21.x's generated
+`c:cobblestones` is `minecraft:cobblestone`, `mossy_cobblestone`,
+`cobbled_deepslate`, `infested_cobblestone`.
+
+`black_quartz` has no crafting route in the jar: it comes from
+`black_quartz_ore` (worldgen) by smelting/blasting and from the crusher's
+`black_quartz_ore` recipe, so the two chain pieces above become reachable only
+with the ore or with the grown crystal.
+
 ## Class + tier and slice boundary
 
 - **Class**: `content` · **tier**: `machines` (`ports/ledger.csv`), approach

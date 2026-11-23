@@ -24,6 +24,8 @@ copies the two machines' files and applies only the patches listed in
    exist in this slice (the raw carry's tag names all 125 AA blocks).
 5. A creative tab (`data/actuallyadditions/horizon/creative_tab/machines.json`)
    because upstream's tab is code, and a subset `lang/en_us.json`.
+6. `data/c/tags/item/cobblestones.json` (slice 3): NeoForge's `c:cobblestones`
+   convention tag, which 26.3 does not ship and both machine recipes key on.
 
 Run from the campaign root; it writes `assets/` and `data/` at the package root (the SDK
 layout — there is no `content/` folder any more, and the root `horizon-mod.toml` is the only
@@ -42,6 +44,23 @@ CARRY = ROOT / "ports/_shared/carry-work/actuallyadditions/carry"
 OUT = ROOT / "ports/actuallyadditions"
 
 BLOCKS = ("coal_generator", "crusher")
+# The crafting chain's first two pieces (slice 3, 0.2.4): the Iron Casing is a
+# block upstream (`Blocks.IRON_CASING`, `ActuallyBlocks.java:42`), so it carries
+# a blockstate, a block model, an item model and a loot table like any block;
+# the Basic Coil is a plain item. Both are ingredients of the Coal Generator's
+# recipe, which could not resolve before they existed.
+CASING = "iron_casing"
+ITEMS = ("basic_coil",)
+# `c:cobblestones` is a NeoForge convention tag, not a jar file: 26.3 ships no
+# `c:` namespace, so the port declares the tag the mod's own recipes use. The
+# four members are NeoForge 1.21.x's generated list (the same values the
+# theurgy port records in `tools/tag_members.json`), all present in 26.3.
+COBBLESTONE_TAG = (
+    "minecraft:cobbled_deepslate",
+    "minecraft:cobblestone",
+    "minecraft:infested_cobblestone",
+    "minecraft:mossy_cobblestone",
+)
 TEXTURES = (
     "base_texture.png",
     "base_texture_back.png",
@@ -116,6 +135,72 @@ def main() -> None:
             }
         write(data / f"horizon/block/{block}.json", json.dumps(declaration, indent=2) + "\n")
 
+    # The crafting chain's first two pieces.
+    copy(
+        CARRY / f"assets/actuallyadditions/blockstates/{CASING}.json",
+        assets / f"blockstates/{CASING}.json",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/items/{CASING}.json",
+        assets / f"items/{CASING}.json",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/models/block/{CASING}.json",
+        assets / f"models/block/{CASING}.json",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/models/item/{CASING}.json",
+        assets / f"models/item/{CASING}.json",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/textures/block/{CASING}.png",
+        assets / f"textures/block/{CASING}.png",
+    )
+    copy(
+        CARRY / f"data/actuallyadditions/loot_table/blocks/{CASING}.json",
+        data / f"loot_table/blocks/{CASING}.json",
+    )
+    for item in ITEMS:
+        copy(
+            CARRY / f"assets/actuallyadditions/items/{item}.json",
+            assets / f"items/{item}.json",
+        )
+        copy(
+            CARRY / f"assets/actuallyadditions/models/item/{item}.json",
+            assets / f"models/item/{item}.json",
+        )
+        copy(
+            CARRY / f"assets/actuallyadditions/textures/item/{item}.png",
+            assets / f"textures/item/{item}.png",
+        )
+        write(
+            data / f"horizon/item/{item}.json",
+            json.dumps(
+                json.loads((CARRY / f"data/actuallyadditions/horizon/item/{item}.json").read_text()),
+                indent=2,
+            )
+            + "\n",
+        )
+    # Upstream: `Blocks.STONE` copied, `strength(1.5f, 10f)` and a metal sound
+    # (`ActuallyBlocks.miscBlockProperties`), so the same numbers as the machines.
+    write(
+        data / f"horizon/block/{CASING}.json",
+        json.dumps(
+            {
+                "template": "minecraft:stone",
+                "properties": {
+                    "hardness": 1.5,
+                    "explosion_resistance": 10.0,
+                    "sounds": "minecraft:iron_block",
+                    "requires_tool": True,
+                },
+                "item": True,
+            },
+            indent=2,
+        )
+        + "\n",
+    )
+
     for texture in TEXTURES:
         copy(
             CARRY / f"assets/actuallyadditions/textures/block/{texture}",
@@ -150,17 +235,27 @@ def main() -> None:
     # Every block the tag names must exist; a subset keeps the tag honest.
     write(
         OUT / "data/minecraft/tags/block/mineable/pickaxe.json",
-        json.dumps({"values": [f"actuallyadditions:{b}" for b in BLOCKS]}, indent=2) + "\n",
+        json.dumps({"values": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING,)]}, indent=2)
+        + "\n",
     )
 
-    # Upstream's creative tab is code; one tab for the slice.
+    # The item tag the mod's own recipes key on (`#c:cobblestones` in
+    # `recipe/coal_generator.json` and `recipe/crusher.json`). Without it the
+    # loader drops both recipes as an unresolved ingredient.
+    write(
+        OUT / "data/c/tags/item/cobblestones.json",
+        json.dumps({"values": list(COBBLESTONE_TAG)}, indent=2) + "\n",
+    )
+
+    # Upstream's creative tab is code; one tab for the slice, with the two
+    # crafting-chain pieces the machine recipes are made of.
     write(
         data / "horizon/creative_tab/machines.json",
         json.dumps(
             {
                 "title": "itemGroup.actuallyadditions.machines",
                 "icon": "actuallyadditions:coal_generator",
-                "items": [f"actuallyadditions:{b}" for b in BLOCKS],
+                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING,) + ITEMS],
             },
             indent=2,
         )

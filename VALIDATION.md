@@ -1,5 +1,32 @@
 # Validation
 
+**0.2.4 (2026-11-23, pin `0a875da`)** — slice 3: the Iron Casing block, the Basic Coil item and the
+`c:cobblestones` item tag, so the Coal Generator's own recipe resolves and crafts. No Rust change
+(`src/*.rs` byte-identical to 0.2.3).
+
+| Check | Command | Result |
+|---|---|---|
+| content rule | `python3 tools/check_recipe_keys.py` | red on the pre-slice `data/` (`coal_generator: unresolved #c:cobblestones, actuallyadditions:iron_casing`, exit 1), green after (`2 recipe(s), 1 craftable, 1 blocked, 0 failure(s)`) — `evidence/actuallyadditions/check-recipe-keys-red.log`, `check-recipe-keys.log` |
+| tests | `cargo test --offline` | **31 passed / 0 failed**, `Compiling actuallyadditions v0.2.4` — `evidence/actuallyadditions/sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| package | `cargo horizon-mod build` twice, **lock kept** | **110,156 B** both, `cmp` identical, sha256 `f7767eba…dd1d67`, **103 entries with `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.txt` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | EXIT 0 (`actuallyadditions 0.2.4 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`) — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` (a tautology) |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1** (includes the packed lock) |
+| in-game | `tools/e2e.sh --offscreen` on the launcher-built game | `PASS` + `EXIT:0` — `evidence/actuallyadditions-e2e/e2e-launcher.log`; the crafting phase's own line is `recipe PASS: …` |
+| counterfactual | `NEGATIVE=1 tools/e2e.sh` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour) …` + `EXIT:1` — `e2e-launcher-negative.log` |
+| counterfactual | `SELFTEST=1 tools/e2e.sh` | `FAIL: SELFTEST flipped: the placed machine kept 2620 FE, not 0` + `EXIT:1` — `e2e-launcher-selftest.log` |
+| counterfactual | `SELFTEST=drops tools/e2e.sh` | `FAIL: SELFTEST drops: the payload carries no Items …` + `EXIT:1` — `e2e-launcher-selftest-drops.log` |
+| control | the same script on the same Nightly **without** the package | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `python3 ports/tools/check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=5 ok=5` |
+
+Every log prints the package's sha256 and size it was run against (and `sdk-test.log` the three
+source hashes). The launcher build is `native-0a875da-f3eb138168ab`, exported to
+`~/.cache/horizon-e2e/0a875da/actuallyadditions/`. The 0.2.3 logs are the ones this block
+supersedes; 0.2.2 and 0.2.1 stay under `retired-0.2.2/` and `retired-0.2.1/`.
+
 **0.2.3 (2026-11-23, pin `0a875da`)** — review fixes for `horizon-mods#1557` round 1: the drop
 payload is an allowlist (no `Items`), the registry `Cargo.lock` ships, the upstream MIT notice is
 verbatim.

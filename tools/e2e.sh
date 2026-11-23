@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# In-game check for Actually Additions slice 2: the Coal Generator and the Crusher, and the state
-# a broken machine keeps on its own item.
+# In-game check for Actually Additions: the Coal Generator and the Crusher, the state a broken machine
+# keeps on its own item, and (0.2.4) the crafting chain's first two pieces, so the Coal Generator's own
+# recipe crafts.
 #
 # 0.2.2 is one flat SDK package (mod API 0.2), built by the launcher, so the game carries the
 # package itself and there is no `--dev-mod` folder any more.
 #
 # The arena is built in the Overworld at y=100 (a stone floor, clear air), so every block read and
 # right click is in the player's own dimension.
+#
+# `--offscreen`, not `--headless`: the crafting phase clicks the table's grid slots, and a slot click
+# needs the screen's rendered layout (`horizon-ctl click-slot` answers "no renderer yet" under
+# `--headless`). Nothing else in the scenario depends on the renderer.
 #
 # Default run:
 #  - a generator with no fuel makes no FE for 40 ticks (control);
@@ -26,15 +31,22 @@
 #    machine reads its FE back and its container is empty (the engine's spill, not the payload);
 #    an empty crusher's payload is zeros (the differential).
 #  - the machines keep their FE/burn and the crusher's output survives `save` + quit + relaunch;
+#  - (0.2.4) the Coal Generator's own recipe unlocks and crafts in a vanilla crafting table from four
+#    cobblestone (via the `c:cobblestones` tag, including its mossy member), two iron casings and a
+#    coal, all nine items consumed; the same grid with iron ingots in the casing cells and with
+#    stone in the cobblestone cells stays empty, and the Crusher's recipe is still absent from the
+#    recipe manager (blocked on `restonia_crystal`, which upstream grows rather than crafts);
 #  - with CONTROL_GAME set, an unmodded game on the same scratch home knows neither id
 #    (`setblock` answers `Unknown block type`), so the ids are the package's.
 #
 # SELFTEST=1 flips the "the placed generator kept its FE" assertion (it must FAIL), proving the
 # scenario can fail; SELFTEST=drops flips the payload assertion ("the container's `Items` travel"),
-# which passes only on the defect this version fixes, so it must fail too.
+# which passes only on the defect this version fixes, so it must fail too. NEGATIVE=1 flips the
+# crafting phase's recipe-book assertion ("the Coal Generator's recipe is not unlocked"), which is the
+# pre-0.2.4 state, so it must fail on this package.
 #
 #   GAME=<launcher-built horizon-client> [CTL=<horizon-ctl>] [CONTROL_GAME=<unmodded game>] \
-#       [SELFTEST=1] tools/e2e.sh
+#       [SELFTEST=1|drops] [NEGATIVE=1] tools/e2e.sh
 set -euo pipefail
 export LC_ALL=C
 
@@ -44,6 +56,7 @@ RES=${RES:-${HORIZON_RES:-/home/adlf/Desktop/horizon/.local/horizon-client/26.3}
 SOCK=${SOCK:-/tmp/opencode/actuallyadditions-e2e.sock}
 GSOCK=${GSOCK:-/tmp/opencode/actuallyadditions-e2e-guest.sock}
 SELFTEST=${SELFTEST:-0}
+NEGATIVE=${NEGATIVE:-0}
 KEEP=${KEEP:-0}
 GAME=${GAME:-}
 CONTROL_GAME=${CONTROL_GAME:-}
@@ -175,7 +188,7 @@ launch() {
     rm -f "$SOCK"
     cd "$SCRATCH"
     "$CTL" --socket "$SOCK" launch \
-        --game "$GAME" --world "$WORLD" --seed 20261105 --creative --headless --wait \
+        --game "$GAME" --world "$WORLD" --seed 20261105 --creative --offscreen --wait \
         --resources "$RES" >/dev/null
     ctl wait-ready 120 >/dev/null
     ctl wait 40 >/dev/null
@@ -373,15 +386,22 @@ ctl command "item replace entity @s hotbar.0 with minecraft:iron_pickaxe 1" >/de
 ctl wait 4
 ctl select 1 >/dev/null
 ctl wait 3
-ctl tp "$((RESTORE_X + 4)).5" 100 "$((RESTORE_Z - 2)).5" >/dev/null
+# Stand 3.5 blocks off, not 2: an item entity within ~1 block of a player is picked up after
+# its 10-tick pickup delay and the drop drifts a little, so a nearer stance sometimes put the
+# drop in the inventory before this leg could read it (measured: the drop's advancement fired
+# mid-leg).
+ctl tp "$((RESTORE_X + 4)).5" 100 "$((RESTORE_Z - 3)).5" >/dev/null
 ctl wait 6
-ctl break $((RESTORE_X + 4)) 100 "$RESTORE_Z" >/dev/null || fail "the charged generator did not break"
+BREAK=$(ctl break $((RESTORE_X + 4)) 100 "$RESTORE_Z") || fail "the charged generator did not break"
+echo "  break: $(jq -c '{drops, picked_up, items_left_on_ground}' <<<"$BREAK")"
 ctl wait 30
 GONE=$(ctl block $((RESTORE_X + 4)) 100 "$RESTORE_Z" | jq -r '.name // .block // empty')
 [ "$GONE" = "minecraft:air" ] || fail "the generator was not broken ($GONE)"
-DROPS=$(ctl entities 8 item | jq -c '[.entities[] | select(.kind == "item" and .item.item == "actuallyadditions:coal_generator") | .item]')
-echo "  dropped: $DROPS"
-jq -e 'length == 1' <<<"$DROPS" >/dev/null || fail "the broken generator did not drop itself: $DROPS"
+# `horizon-ctl break` watches the item entities its own break makes for 20 ticks and reports
+# them (`drops`), plus what reached the inventory (`picked_up`): the drop record, not a scrape
+# of the ground that a pickup can race.
+jq -e '((.drops["actuallyadditions:coal_generator"] // 0) + (.picked_up["actuallyadditions:coal_generator"] // 0)) >= 1' \
+    <<<"$BREAK" >/dev/null || fail "the broken generator did not drop itself: $BREAK"
 # `ctl entities`/`encode_components` leaves `minecraft:block_entity_data` out of the printed
 # patch (measured), so the drop is proven by placing it again and reading the machine back.
 # Pick it up (walk onto the drop and take it), place it again, read the machine. Back to
@@ -393,7 +413,7 @@ ctl tp "$(centre $((RESTORE_X + 4)))" 100 "$(centre "$RESTORE_Z")" >/dev/null
 ctl wait 40
 for _ in 1 2 3; do
     ctl select actuallyadditions:coal_generator >/dev/null 2>&1 && break
-    DROP=$(ctl entities 8 item | jq -r '[.entities[] | select(.item.item == "actuallyadditions:coal_generator") | .position] | first // empty | @csv')
+    DROP=$(ctl entities 12 item | jq -r '[.entities[] | select(.item.item == "actuallyadditions:coal_generator") | .position] | first // empty | @csv')
     [ -n "$DROP" ] || break
     echo "  the drop lies at $DROP"
     IFS=, read -r dx dy dz <<<"$DROP"
@@ -448,51 +468,93 @@ echo "== a loaded crusher keeps its state and never its stacks (0.2.3) =="
 # drop every stack twice and load them back into the placed machine (HANDOVER §9m), so the
 # carrier is an allowlist: `energy` and `progress`, never `Items`.
 CT=12; CT_Z=5; CT_RESTORE_X=14; CT_FRESH_X=16; CT_FRESH_RESTORE_X=18
-ctl command "setblock $CT 100 $((CT_Z - 1)) actuallyadditions:coal_generator" >/dev/null
-ctl command "setblock $CT 100 $CT_Z actuallyadditions:crusher" >/dev/null
-ctl wait 6
-feed $CT 100 $((CT_Z - 1)) minecraft:coal
-ctl wait 400
-CHARGED=$(info $CT 100 $CT_Z)
-echo "  charged crusher: $CHARGED"
-[ "$(energy_of "$CHARGED")" -gt 7000 ] \
-    || fail "the crusher beside the burning generator did not charge: $CHARGED"
-# Cut the generator before the operation starts, so the crusher's own buffer is what it spends
-# and the break's ticks cannot run the operation to its end (100 ticks) under a live feed.
-ctl command "setblock $CT 100 $((CT_Z - 1)) minecraft:air" >/dev/null
-ctl wait 2
-feed $CT 100 $CT_Z minecraft:coal_ore
-ctl wait 6
-BEFORE_CRUSH=$(info $CT 100 $CT_Z)
-echo "  before breaking the loaded crusher: $BEFORE_CRUSH"
-[ "$(energy_of "$BEFORE_CRUSH")" -gt 0 ] || fail "the loaded crusher has no FE: $BEFORE_CRUSH"
-[ "$(progress_of "$BEFORE_CRUSH")" -gt 0 ] \
-    || fail "the loaded crusher has not started its operation: $BEFORE_CRUSH"
-[ "$(field_of "$BEFORE_CRUSH" input)" = "minecraft:coal_ore x1" ] \
-    || fail "the loaded crusher does not hold the coal ore: $BEFORE_CRUSH"
-CRUSH_ENERGY=$(energy_of "$BEFORE_CRUSH")
-CRUSH_PROGRESS=$(progress_of "$BEFORE_CRUSH")
-# Survival break with a real tool, the player within reach: the player's own break runs the loot
-# table and `block_drops`.
-ctl command "gamemode survival @s" >/dev/null
-ctl command "item replace entity @s hotbar.0 with minecraft:iron_pickaxe 1" >/dev/null
-ctl wait 4
-ctl select 1 >/dev/null
-ctl wait 3
-ctl tp "$CT.5" 100 "$((CT_Z - 2)).5" >/dev/null
-ctl wait 6
-ctl look-at-block $CT 100 "$CT_Z" up >/dev/null
-ctl wait 2
-ctl break $CT 100 "$CT_Z" >/dev/null || fail "the loaded crusher did not break"
-ctl wait 30
-GONE=$(ctl block $CT 100 "$CT_Z" | jq -r '.name // .block // empty')
-[ "$GONE" = "minecraft:air" ] || fail "the loaded crusher was not broken ($GONE)"
-echo "  items near the break: $(ctl entities 8 item | jq -c '[.entities[] | select(.kind == "item") | {item: .item.item, count: .item.count, position}]')"
-# The carrier itself, read from the dropped stack: vanilla's `Item` component patch is what the
-# placement applies, and `data get` prints it whole (`ctl entities` leaves
-# `minecraft:block_entity_data` out, which is why the earlier leg asserts by placing).
-DROP_ITEM=$(ctl command "data get entity @e[type=minecraft:item,nbt={Item:{id:\"actuallyadditions:crusher\"}},limit=1,sort=nearest] Item" 2>&1 || true)
-echo "  the crusher drop's Item tag: $DROP_ITEM"
+# A container machine's break produces two item entities — the loot table's machine and the
+# engine's spill of the container. A player standing close can take either one before the reads
+# (see the break below), so the leg steps back and, as insurance, rebuilds the machine and breaks
+# it again if one of the two is still missing; three misses in a row are a failure.
+DROP_ITEM=""
+SPILL_ITEM=""
+break_attempt=0
+while :; do
+    break_attempt=$((break_attempt + 1))
+    if [ "$break_attempt" -gt 3 ]; then
+        fail "the engine lost the crusher's drop or its container spill on 3 breaks in a row (drop: ${DROP_ITEM:-none}; spill: ${SPILL_ITEM:-none})"
+    fi
+    # Clear the ground so the pickup below can only find this attempt's drop.
+    ctl command "kill @e[type=item]" >/dev/null
+    ctl wait 4
+    ctl command "setblock $CT 100 $((CT_Z - 1)) actuallyadditions:coal_generator" >/dev/null
+    ctl command "setblock $CT 100 $CT_Z actuallyadditions:crusher" >/dev/null
+    ctl wait 6
+    feed $CT 100 $((CT_Z - 1)) minecraft:coal
+    ctl wait 400
+    CHARGED=$(info $CT 100 $CT_Z)
+    echo "  charged crusher: $CHARGED"
+    [ "$(energy_of "$CHARGED")" -gt 7000 ] \
+        || fail "the crusher beside the burning generator did not charge: $CHARGED"
+    # Cut the generator before the operation starts, so the crusher's own buffer is what it spends
+    # and the break's ticks cannot run the operation to its end (100 ticks) under a live feed.
+    ctl command "setblock $CT 100 $((CT_Z - 1)) minecraft:air" >/dev/null
+    ctl wait 2
+    feed $CT 100 $CT_Z minecraft:coal_ore
+    ctl wait 6
+    BEFORE_CRUSH=$(info $CT 100 $CT_Z)
+    echo "  before breaking the loaded crusher: $BEFORE_CRUSH"
+    [ "$(energy_of "$BEFORE_CRUSH")" -gt 0 ] || fail "the loaded crusher has no FE: $BEFORE_CRUSH"
+    [ "$(progress_of "$BEFORE_CRUSH")" -gt 0 ] \
+        || fail "the loaded crusher has not started its operation: $BEFORE_CRUSH"
+    [ "$(field_of "$BEFORE_CRUSH" input)" = "minecraft:coal_ore x1" ] \
+        || fail "the loaded crusher does not hold the coal ore: $BEFORE_CRUSH"
+    CRUSH_ENERGY=$(energy_of "$BEFORE_CRUSH")
+    CRUSH_PROGRESS=$(progress_of "$BEFORE_CRUSH")
+    # Survival break with a real tool, the player within reach: the player's own break runs the loot
+    # table and `block_drops`.
+    ctl command "gamemode survival @s" >/dev/null
+    ctl command "item replace entity @s hotbar.0 with minecraft:iron_pickaxe 1" >/dev/null
+    ctl wait 4
+    ctl select 1 >/dev/null
+    ctl wait 3
+    # 3.5 blocks off (see the generator's break): close enough to mine, too far to pick up.
+    ctl tp "$CT.5" 100 "$((CT_Z - 3)).5" >/dev/null
+    ctl wait 6
+    BREAK=$(ctl break $CT 100 "$CT_Z") || fail "the loaded crusher did not break"
+    echo "  break: $(jq -c '{drops, picked_up, items_left_on_ground}' <<<"$BREAK")"
+    ctl wait 30
+    GONE=$(ctl block $CT 100 "$CT_Z" | jq -r '.name // .block // empty')
+    [ "$GONE" = "minecraft:air" ] || fail "the loaded crusher was not broken ($GONE)"
+    echo "  items near the break: $(ctl entities 12 item | jq -c '[.entities[] | select(.kind == "item") | {item: .item.item, count: .item.count, position}]')"
+    # The carrier itself, read from the dropped stack: vanilla's `Item` component patch is what the
+    # placement applies, and `data get` prints it whole (`ctl entities` leaves
+    # `minecraft:block_entity_data` out, which is why the earlier leg asserts by placing).
+    DROP_ITEM=""
+    for _ in $(seq 1 12); do
+        DROP_ITEM=$(ctl command "data get entity @e[type=minecraft:item,nbt={Item:{id:\"actuallyadditions:crusher\"}},limit=1,sort=nearest] Item" 2>&1 || true)
+        case "$DROP_ITEM" in
+            *"following entity data"*) break ;;
+        esac
+        ctl wait 5 >/dev/null
+    done
+    echo "  the crusher drop's Item tag: $DROP_ITEM"
+    # The input is the engine's to spill: it lies in the world as its own plain coal ore, with none
+    # of the machine's state on it.
+    SPILL_ITEM=""
+    for _ in $(seq 1 12); do
+        SPILL_ITEM=$(ctl command "data get entity @e[type=minecraft:item,nbt={Item:{id:\"minecraft:coal_ore\"}},limit=1,sort=nearest] Item" 2>&1 || true)
+        case "$SPILL_ITEM" in
+            *"minecraft:coal_ore"*) break ;;
+        esac
+        ctl wait 5 >/dev/null
+    done
+    # The break's own reply is the drop record; the entity reads above add the payload tag.
+    if jq -e '(.drops["actuallyadditions:crusher"] // 0) >= 1 and (.drops["minecraft:coal_ore"] // 0) >= 1' \
+            <<<"$BREAK" >/dev/null; then
+        case "$DROP_ITEM" in
+            *"following entity data"*)
+                case "$SPILL_ITEM" in *"minecraft:coal_ore"*) break ;; esac ;;
+        esac
+    fi
+    echo "  attempt $break_attempt: the drop record or the reads were incomplete; rebuilding the machine"
+done
 case "$DROP_ITEM" in
     *"following entity data"*) ;;
     *) fail "could not read the crusher drop's Item tag: $DROP_ITEM" ;;
@@ -519,9 +581,6 @@ fi
 grep -q 'Items' <<<"$DROP_ITEM" \
     && fail "the payload carries the container's Items, which the engine spills by itself: $DROP_ITEM"
 echo "  the drop carries energy and progress and no Items"
-# The input is the engine's to spill: it lies in the world as its own plain coal ore, with none
-# of the machine's state on it.
-SPILL_ITEM=$(ctl command "data get entity @e[type=minecraft:item,nbt={Item:{id:\"minecraft:coal_ore\"}},limit=1,sort=nearest] Item" 2>&1 || true)
 echo "  the spilled input's Item tag: $SPILL_ITEM"
 case "$SPILL_ITEM" in
     *"minecraft:coal_ore"*) ;;
@@ -540,7 +599,7 @@ ctl wait 40
 for _ in 1 2 3; do
     HELD=$(ctl inventory | jq -r '.held.item // empty')
     [ "$HELD" = "actuallyadditions:crusher" ] && break
-    DROP=$(ctl entities 8 item | jq -r '[.entities[] | select(.item.item == "actuallyadditions:crusher") | .position] | first // empty | @csv')
+    DROP=$(ctl entities 12 item | jq -r '[.entities[] | select(.item.item == "actuallyadditions:crusher") | .position] | first // empty | @csv')
     [ -n "$DROP" ] || break
     IFS=, read -r dx dy dz <<<"$DROP"
     ctl tp "$dx" "$dy" "$dz" >/dev/null
@@ -589,42 +648,73 @@ ctl command "item replace entity @s hotbar.0 with minecraft:iron_pickaxe 1" >/de
 ctl wait 4
 ctl select 1 >/dev/null
 ctl wait 3
-ctl tp "$CT_FRESH_X.5" 100 "$((CT_Z - 2)).5" >/dev/null
+# 3.5 blocks off (see the generator's break): close enough to mine, too far to pick up.
+ctl tp "$CT_FRESH_X.5" 100 "$((CT_Z - 3)).5" >/dev/null
 ctl wait 6
-ctl look-at-block $CT_FRESH_X 100 "$CT_Z" up >/dev/null
-ctl wait 2
-ctl break $CT_FRESH_X 100 "$CT_Z" >/dev/null || fail "the empty crusher did not break"
+BREAK=$(ctl break $CT_FRESH_X 100 "$CT_Z") || fail "the empty crusher did not break"
+echo "  break: $(jq -c '{drops, picked_up, items_left_on_ground}' <<<"$BREAK")"
+jq -e '((.drops["actuallyadditions:crusher"] // 0) + (.picked_up["actuallyadditions:crusher"] // 0)) >= 1' \
+    <<<"$BREAK" >/dev/null || fail "the empty crusher did not drop itself: $BREAK"
 ctl wait 30
 FRESH_GONE=$(ctl block $CT_FRESH_X 100 "$CT_Z" | jq -r '.name // .block // empty')
 [ "$FRESH_GONE" = "minecraft:air" ] || fail "the empty crusher was not broken ($FRESH_GONE)"
-echo "  items near the empty break: $(ctl entities 8 item | jq -c '[.entities[] | select(.kind == "item") | .item.item]')"
-FRESH_DROP=$(ctl command "data get entity @e[type=minecraft:item,limit=1,sort=nearest,distance=..8] Item" 2>&1 || true)
-echo "  the empty crusher's Item tag: $FRESH_DROP"
-case "$FRESH_DROP" in
-    *"following entity data"*) ;;
-    *) fail "could not read the empty crusher's dropped Item tag: $FRESH_DROP" ;;
-esac
-# An idle machine writes nothing back (`BlockEntityTickReply::Unchanged`), so its saved compound
-# holds no state keys at all and the allowlist carries only the `id`: a zero payload either way.
-grep -qE 'energy: *[1-9]' <<<"$FRESH_DROP" \
-    && fail "an empty crusher's payload carries FE: $FRESH_DROP"
-grep -qE 'progress: *[1-9]' <<<"$FRESH_DROP" \
-    && fail "an empty crusher's payload carries progress: $FRESH_DROP"
-ctl command "gamemode creative @s" >/dev/null
-ctl wait 4
-ctl command "clear @s" >/dev/null
-ctl wait 2
-ctl tp "$CT_FRESH_X.5" 100 "$(centre "$CT_Z")" >/dev/null
-ctl wait 40
-for _ in 1 2 3; do
-    HELD=$(ctl inventory | jq -r '.held.item // empty')
-    [ "$HELD" = "actuallyadditions:crusher" ] && break
-    DROP=$(ctl entities 8 item | jq -r '[.entities[] | select(.item.item == "actuallyadditions:crusher") | .position] | first // empty | @csv')
-    [ -n "$DROP" ] || break
-    IFS=, read -r dx dy dz <<<"$DROP"
-    ctl tp "$dx" "$dy" "$dz" >/dev/null
-    ctl wait 20
+echo "  items near the empty break: $(ctl entities 12 item | jq -c '[.entities[] | select(.kind == "item") | .item.item]')"
+# The drop may lie in the world or have been taken into the inventory before the step-back
+# above (a player within ~1 block picks an item up after its 10-tick delay). Both outcomes prove
+# the same thing; a world drop additionally lets the raw `Item` tag be read, and a picked-up
+# stack is proven by placing it again below.
+FRESH_DROP=""
+FRESH_IN_HAND=false
+for _ in $(seq 1 16); do
+    FRESH_DROP=$(ctl command "data get entity @e[type=minecraft:item,limit=1,sort=nearest,distance=..8] Item" 2>&1 || true)
+    case "$FRESH_DROP" in
+        *"following entity data"*) break ;;
+    esac
+    if [ "$(ctl inventory | jq -r '.counts["actuallyadditions:crusher"] // 0')" -ge 1 ]; then
+        FRESH_IN_HAND=true
+        break
+    fi
+    ctl wait 5 >/dev/null
 done
+if [ "$FRESH_IN_HAND" = true ]; then
+    echo "  the empty crusher's drop went into the inventory, not the ground: $FRESH_DROP"
+    ctl command "gamemode creative @s" >/dev/null
+    ctl wait 4
+else
+    echo "  the empty crusher's Item tag: $FRESH_DROP"
+    case "$FRESH_DROP" in
+        *"following entity data"*) ;;
+        *) fail "the empty crusher neither dropped nor was picked up: $FRESH_DROP" ;;
+    esac
+    # An idle machine writes nothing back (`BlockEntityTickReply::Unchanged`), so its saved
+    # compound holds no state keys at all and the allowlist carries only the `id`: a zero payload
+    # either way.
+    grep -qE 'energy: *[1-9]' <<<"$FRESH_DROP" \
+        && fail "an empty crusher's payload carries FE: $FRESH_DROP"
+    grep -qE 'progress: *[1-9]' <<<"$FRESH_DROP" \
+        && fail "an empty crusher's payload carries progress: $FRESH_DROP"
+    ctl command "gamemode creative @s" >/dev/null
+    ctl wait 4
+    ctl command "clear @s" >/dev/null
+    ctl wait 2
+    ctl tp "$CT_FRESH_X.5" 100 "$(centre "$CT_Z")" >/dev/null
+    ctl wait 40
+    for _ in 1 2 3; do
+        HELD=$(ctl inventory | jq -r '.held.item // empty')
+        [ "$HELD" = "actuallyadditions:crusher" ] && break
+        DROP=$(ctl entities 12 item | jq -r '[.entities[] | select(.item.item == "actuallyadditions:crusher") | .position] | first // empty | @csv')
+        [ -n "$DROP" ] || break
+        IFS=, read -r dx dy dz <<<"$DROP"
+        ctl tp "$dx" "$dy" "$dz" >/dev/null
+        ctl wait 20
+    done
+fi
+HELD=$(ctl inventory | jq -r '.held.item // empty')
+if [ "$HELD" != "actuallyadditions:crusher" ]; then
+    ctl select actuallyadditions:crusher >/dev/null 2>&1 \
+        || fail "the empty crusher's drop is in neither the world nor the hand: $(ctl inventory | jq -c '.counts')"
+    ctl wait 3
+fi
 ctl tp "$CT_FRESH_RESTORE_X.5" 100 "$((CT_Z - 1)).5" >/dev/null
 ctl wait 6
 ctl place $CT_FRESH_RESTORE_X 100 "$CT_Z" >/dev/null || fail "the empty crusher could not be placed again"
@@ -730,6 +820,75 @@ line=$(info 1 100 0)
 echo "  crusher after relaunch: $line"
 [ "$(energy_of "$line")" -gt 0 ] || fail "the crusher lost its FE across a relaunch: $line"
 
+echo "== the Coal Generator's own recipe crafts (slice 3, 0.2.4) =="
+# The recipe is carried from the jar (`data/actuallyadditions/recipe/coal_generator.json`,
+# `CIC / CAC / CIC`). Until 0.2.4 the loader dropped it — `#c:cobblestones` and
+# `actuallyadditions:iron_casing` did not resolve — so the machine had no recipe at all. The table,
+# the grid fill, the tag members and the two controls live in tools/craft_check.py (the same tool
+# shape bigreactors uses for its nine recipes).
+CRAFT_X=20; CRAFT_Z=8
+ctl command "gamemode creative @s" >/dev/null
+ctl wait 4
+NEGATIVE_FLAG=""
+if [ "$NEGATIVE" = 1 ]; then NEGATIVE_FLAG="--negative"; fi
+python3 "$PORT/tools/craft_check.py" "$SOCK" "$CTL" $CRAFT_X 100 $CRAFT_Z $NEGATIVE_FLAG \
+    || fail "the Coal Generator's recipe phase failed (see the FAIL line above)"
+ctl command "clear @s" >/dev/null
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+
+echo "== the Iron Casing block places, reads back and drops itself =="
+# The jar's `iron_casing` is a block (`Blocks.IRON_CASING`, `ActuallyBlocks.java:42`), not just the
+# item the Coal Generator recipe keys on: it must place, read back, refuse an id the package does
+# not declare, and drop itself from its carried loot table.
+CASING_X=22; CASING_Z=-6
+ctl command "clear @s" >/dev/null
+ctl command "gamemode creative @s" >/dev/null
+ctl wait 4
+ctl command "setblock $CASING_X 100 $CASING_Z actuallyadditions:iron_casing" >/dev/null
+ctl wait 6
+CASING_AT=$(ctl block "$CASING_X" 100 "$CASING_Z" | jq -r '.name // .block // empty')
+echo "  block($CASING_X,100,$CASING_Z) = $CASING_AT"
+[ "$CASING_AT" = "actuallyadditions:iron_casing" ] || fail "the Iron Casing block did not place: $CASING_AT"
+ctl give actuallyadditions:iron_casing 1 >/dev/null
+ctl wait 4
+GIVEN=$(ctl inventory | jq -c '.counts')
+echo "  given: $GIVEN"
+case "$GIVEN" in
+    *"actuallyadditions:iron_casing"*) ;;
+    *) fail "the Iron Casing item was not given: $GIVEN" ;;
+esac
+UNKNOWN=$(ctl give actuallyadditions:does_not_exist 1 2>&1 || true)
+echo "  give an unknown id: $UNKNOWN"
+case "$UNKNOWN" in
+    *"unknown item"*) ;;
+    *) fail "an id the package does not declare was accepted: $UNKNOWN" ;;
+esac
+# Break it in survival with a real tool: the carried loot table drops the block itself.
+ctl command "clear @s" >/dev/null
+ctl command "gamemode survival @s" >/dev/null
+ctl command "item replace entity @s hotbar.0 with minecraft:iron_pickaxe 1" >/dev/null
+ctl wait 4
+ctl select 1 >/dev/null
+ctl wait 3
+# 3.5 blocks off (see the generator's break above): close enough to mine, too far to pick up.
+# It stands at z=$CASING_Z, clear of the crafting table at (20, 100, 8): a block between the eye and
+# the target is what `ctl break`'s aim refuses ("... is in the way").
+ctl tp "$CASING_X.5" 100 "$((CASING_Z + 3)).5" >/dev/null
+ctl wait 6
+echo "  at $(ctl state | jq -c '.player.position')"
+BREAK=$(ctl break $CASING_X 100 "$CASING_Z") || fail "the Iron Casing did not break: $BREAK"
+echo "  break: $(jq -c '{drops, picked_up, items_left_on_ground}' <<<"$BREAK")"
+jq -e '((.drops["actuallyadditions:iron_casing"] // 0) + (.picked_up["actuallyadditions:iron_casing"] // 0)) >= 1' \
+    <<<"$BREAK" >/dev/null || fail "the Iron Casing did not drop itself: $BREAK"
+ctl wait 20
+CASING_GONE=$(ctl block "$CASING_X" 100 "$CASING_Z" | jq -r '.name // .block // empty')
+[ "$CASING_GONE" = "minecraft:air" ] || fail "the Iron Casing was not broken ($CASING_GONE)"
+echo "  the Iron Casing dropped itself (asserted from the break's own drop record)"
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 4
+
 control
 
-echo "PASS: a fuelled generator made FE, the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), and the machines survived a relaunch"
+echo "PASS: a fuelled generator made FE, the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, and the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty, and the Crusher's recipe is still uncraftable because restonia_crystal is not in this slice)"

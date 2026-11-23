@@ -1,0 +1,6 @@
+{
+  "actuallyadditions:crusher": {
+    "blocked": "restonia_crystal_growth",
+    "why": "restonia_crystal is grown from a Restonia Crystal Seed in water upstream, never crafted; that mechanic is not in this slice. Everything else the recipe keys on (basic_coil, iron_casing, #c:cobblestones, minecraft:flint) now resolves."
+  }
+}

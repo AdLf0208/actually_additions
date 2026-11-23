@@ -732,7 +732,7 @@ Harness facts measured while getting there:
 | break carries a machine's saved state (crusher, loaded) | **tested (0.2.3)** — a survival break of a crusher with 7,300 FE, progress 36 and a coal ore inside drops an item whose `Item` tag is `{energy: 5180, progress: 89, id: …}` with **no `Items`**; the ore spills as its own plain drop; placing it again reads 5,180 FE with an empty container; an empty crusher's payload is only `{id}` and comes back at 0 — `SELFTEST=drops` flips it to `EXIT:1` |
 | clamp on placement (corrupt `burn`, `progress`, buffer) | unit-tested (`restored_generator`, `restored_crusher`); not reachable from `ctl` |
 | GUI / menu / screen | **blocked(no-single-player-mod-screen)** — see above, code reverted |
-| machine recipes | **not crafting** — carried, and the load log now names why: `recipes: invalid ingredient (unresolved tag or malformed input): "#c:cobblestones"` plus the missing `iron_casing`/`basic_coil`/`restonia_crystal` (the crafting-chain gap; next but one) |
+| machine recipes | **the Coal Generator's crafts (0.2.4)** — see slice 3; the Crusher's is `blocked(restonia_crystal_growth)`. In 0.2.2/0.2.3 both were dropped: `recipes: invalid ingredient (unresolved tag or malformed input): "#c:cobblestones"` |
 
 ### Gaps after slice 2
 
@@ -744,9 +744,10 @@ Everything in the 0.1.0/0.2.0 lists still stands except item 3 of the slice-1 de
 2. **The crusher's own break/place leg** was unit-tested only after slice 2; **closed by the
    review fix below (0.2.3)**: the leg now breaks a loaded crusher in game and asserts its payload,
    its spill and its restore.
-3. **The two machine recipes still do not craft**, and the load log names the unresolved
-   `#c:cobblestones`. The crafting chain (`iron_casing`, `basic_coil`, `restonia_crystal`,
-   `black_quartz`) is the next family; `black_quartz` needs the ore, which is worldgen.
+3. ~~**The two machine recipes still do not craft**, and the load log names the unresolved
+   `#c:cobblestones`~~ — **closed for the Coal Generator by slice 3 (0.2.4)**: the tag, the Iron
+   Casing and the Basic Coil ship and its recipe crafts in game. The Crusher's recipe is still
+   `blocked(restonia_crystal_growth)` (it registers and never crafts — measured; see slice 3).
 4. `minecraft:block_entity_data` carried the **whole** saved compound in 0.2.2, including any
    future keys — **closed by the review fix below (0.2.3)**: the payload is an allowlist of the
    values the port reads back, so a later key cannot ride along unnoticed.
@@ -869,30 +870,230 @@ project.
 The launcher build is `native-0a875da-…` and the leg's first line names the sha256 above, so the
 game ran the delivered archive.
 
-## Next slice (0.2.4)
+## Slice 3 (0.2.4, 2026-11-23) — the crafting chain's first two pieces, and the tag its recipes need
 
-**Family:** the crafting chain's first two pieces — `actuallyadditions:iron_casing` and
-`actuallyadditions:basic_coil` — plus the missing `c:cobblestones` **item tag**, so the **Coal
-Generator's own recipe crafts in game** (its 9 cells need only casings, coal and cobblestone; the
-Crusher's need `restonia_crystal`, which upstream grows rather than crafts).
+**Family:** the crafting chain's first two pieces — `actuallyadditions:iron_casing` (a block
+upstream, `Blocks.IRON_CASING`, `ActuallyBlocks.java:42`) and `actuallyadditions:basic_coil` (a
+plain item) — plus the **`c:cobblestones` item tag**, so the **Coal Generator's own recipe crafts
+in game**. The Crusher's recipe still cannot: it needs `restonia_crystal`, which upstream grows
+from a seed in water rather than crafts.
 
 - **Gap line** (`Gaps after slice 2`, item 3): *"The two machine recipes still do not craft, and
   the load log names the unresolved `#c:cobblestones`. The crafting chain (`iron_casing`,
   `basic_coil`, `restonia_crystal`, `black_quartz`) is the next family; `black_quartz` needs the
   ore, which is worldgen."*
-- **Why it fits `machines`:** it is carried content (two item models + two shaped recipes + one
-  tag) on a machines-tier port, proven through the machine the port already ships — no GUI, no
-  new hook, no renderer. The recipe is dead data today: `recipe/crusher.json` and
-  `recipe/coal_generator.json` ship with keys that resolve to nothing.
-- **In-game assertion that can fail:** `ctl command "recipe give @s actuallyadditions:coal_generator"`
-  → `Unlocked 1 recipe(s)`; place a crafting table, fill `CIC/CAC/CIC` with four
-  `minecraft:cobblestone`, two `actuallyadditions:iron_casing` and one `minecraft:coal`, take the
-  result, and assert `actuallyadditions:coal_generator ×1` in the inventory **and** that the seven
-  ingredients were consumed (`ctl inventory` before/after + `ctl menu`). Differential: the same
-  grid with iron ingots where the casings go yields nothing. Counterfactual `NEGATIVE=1`: the
-  recipe is **not** unlocked when the `c:cobblestones` tag is absent, which is today's state.
-- **Out of scope, and said so:** `restonia_crystal` (upstream grows a seed in water — a mechanic,
-  not a recipe) keeps the Crusher's recipe `blocked(restonia_crystal_growth)`; `black_quartz`
-  needs the ore, i.e. worldgen, which is last in the queue.
+- **Why it fits `machines`:** carried content (one block, one item, one loot table, one tag) on a
+  machines-tier port, proven through the machine the port already ships — no GUI, no new hook, no
+  renderer, no Rust change.
 
-Skills: superpowers/receiving-code-review,systematic-debugging,test-driven-development,verification-before-completion; BeautifulRust/rust-best-practices
+**Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. `src/runtime.rs`, `src/support.rs` and `src/lib.rs`
+are **byte-identical** to 0.2.3 (`215aa1be…`, `60e809d1…`, `e18ecd36…`).
+
+### Behaviour (from the jar and the platform)
+
+| Item | Upstream | This port |
+|---|---|---|
+| `actuallyadditions:iron_casing` | a block: `Blocks.STONE` copied, `strength(1.5f, 10f)`, `SoundType.METAL`; in `minecraft:mineable/pickaxe`; drops itself (loot table) | `horizon/block/iron_casing.json`: template `minecraft:stone`, `hardness 1.5`, `explosion_resistance 10.0`, `sounds minecraft:iron_block`, `requires_tool`, `item: true`; the jar's blockstate/model/loot table, and the id joins the port's subset pickaxe tag |
+| `actuallyadditions:basic_coil` | a plain item, stack 64 | `horizon/item/basic_coil.json`: template `minecraft:stick`, the jar's model and texture; joins the machines creative tab |
+| `c:cobblestones` | a NeoForge convention tag (not a jar file) | `data/c/tags/item/cobblestones.json` with NeoForge 1.21.x's four members — `minecraft:cobblestone`, `mossy_cobblestone`, `cobbled_deepslate`, `infested_cobblestone` (the same list `ports/theurgy/tools/tag_members.json` records); all four exist in 26.3, and 26.3 ships no `c:` namespace, so the tag has to be declared |
+
+`tools/assemble_content.py` carries the two pieces and writes the tag, the pickaxe subset and the
+tab; re-running it changes no other carried byte (checked with a before/after `sha256sum` of every
+file under `assets/` and `data/`: 81 files before, 93 after, the other 81 identical).
+
+### The loader's two failure shapes — measured, not assumed
+
+The 0.2.3 note said both recipes were "dropped". 0.2.4 measured what actually happens, and the two
+cases differ:
+
+- **a missing `#tag` is fatal to the file.** 0.2.3's load log: `recipes: invalid ingredient
+  (unresolved tag or malformed input): "#c:cobblestones"`, and `recipe give @s
+  actuallyadditions:coal_generator` would have answered `Unknown`. That is why **neither** machine
+  recipe existed in 0.2.2/0.2.3.
+- **an unknown item id leaves the recipe registered but unsatisfiable.** With the tag in place,
+  `recipe give @s actuallyadditions:crusher` answers `Unlocked 1 recipe(s)` even though
+  `give actuallyadditions:restonia_crystal` answers `unknown item`, and the crusher's grid stays
+  empty with its two crystal cells unfilled. So the Crusher's recipe is in the book and can never
+  craft — the record is `blocked(restonia_crystal_growth)`, and the in-game leg asserts exactly
+  that (not "the recipe is absent", which would be wrong).
+
+### TDD (content slice): the rule first, red, then the in-game assertion
+
+The family's rule is "every carried crafting recipe's ingredients resolve, or the recipe is a
+recorded blocker". It is machine-checked by the new `tools/check_recipe_keys.py` (vanilla
+`items.json` + the package's own item/block declarations + its `tags/item` files, and
+`tools/recipe-blockers.json`); it reads the 26.3 item registry, so a tag or item that only *looks*
+right fails.
+
+**Red** (`evidence/actuallyadditions/check-recipe-keys-red.log`, run against a copy of the
+pre-slice `data/` — the real 0.2.3 tree — with the blocker file present):
+
+```
+FAIL     actuallyadditions:coal_generator: unresolved #c:cobblestones, actuallyadditions:iron_casing (a missing tag drops the recipe at load, an unknown item leaves it uncraftable; declare the item/tag or add a blocker)
+blocked  actuallyadditions:crusher: restonia_crystal_growth — actuallyadditions:basic_coil, #c:cobblestones, actuallyadditions:iron_casing, actuallyadditions:restonia_crystal
+2 recipe(s), 0 craftable, 1 blocked, 1 failure(s)
+exit=1
+```
+
+**Green** (`check-recipe-keys.log`):
+
+```
+ok       actuallyadditions:coal_generator: every ingredient resolves
+blocked  actuallyadditions:crusher: restonia_crystal_growth — actuallyadditions:restonia_crystal
+2 recipe(s), 1 craftable, 1 blocked, 0 failure(s)
+exit=0
+```
+
+The tool also refuses an **empty** `tags/item` file (the loader drops a tag with no values) and a
+**stale** blocker whose recipe now resolves, so the record cannot rot.
+
+### In-game transcript (`evidence/actuallyadditions-e2e/e2e-launcher.log`, 0.2.4)
+
+`tools/craft_check.py` (the same shape as `bigreactors/tools/craft_check.py`) drives a real crafting
+table (grid slots 100-108, result 200; `ctl screen` reports `craft_size` 3):
+
+```
+  recipe give actuallyadditions:coal_generator -> {"chat": ["Unlocked 1 recipe(s) for Player73342"], "ok": true}
+  (recorded, not asserted) crusher recipe in the book: {"chat": ["Unlocked 1 recipe(s) for Player73342"], "ok": true}
+  give actuallyadditions:restonia_crystal -> {"error": "unknown item actuallyadditions:restonia_crystal"}
+  coal generator (6 cobblestone + 2 iron casings + 1 coal): result {"count": 1, "item": "actuallyadditions:coal_generator", "slot": 200}
+  coal generator (6 cobblestone + 2 iron casings + 1 coal): inventory after the craft {"minecraft:cobblestone": 2, "actuallyadditions:iron_casing": 2, "minecraft:coal": 1, "actuallyadditions:coal_generator": 1}
+  control: iron ingots where the casings go: result null
+  coal generator from mossy cobblestone (a c:cobblestones member): result {"count": 1, "item": "actuallyadditions:coal_generator", "slot": 200}
+  coal generator from mossy cobblestone (a c:cobblestones member): inventory after the craft {"minecraft:mossy_cobblestone": 2, "actuallyadditions:iron_casing": 2, "minecraft:coal": 1, "actuallyadditions:coal_generator": 1}
+  control: stone in the cobblestone cells (not a c:cobblestones member): result null
+  control: the Crusher's own recipe without restonia_crystal (blocked): result null
+recipe PASS: the Coal Generator's own recipe unlocks, crafts one machine from six cobblestone, two iron casings and a coal (all consumed, empty grid), also crafts from a mossy cobblestone tag member, stays empty for iron ingots in the casing cells and for stone in the cobblestone cells, and the Crusher's recipe stays uncraftable (blocked(restonia_crystal_growth))
+```
+
+Every assertion can fail: the recipe unlock is the pre-0.2.4 red state (`NEGATIVE=1` flips it and
+the run fails at it — `e2e-launcher-negative.log`); the iron-ingot differential is the brief's own;
+mossy cobblestone proves the key is a **tag** and not the plain block; stone proves it is not a
+wildcard.
+
+The new block leg (also in the same log):
+
+```
+  block(22,100,-6) = actuallyadditions:iron_casing
+  given: {"actuallyadditions:iron_casing":1}
+  give an unknown id: {"error":"unknown item actuallyadditions:does_not_exist"}
+  at [22.5,100.0,-3.5]
+  break: {"drops":{"actuallyadditions:iron_casing":1},"picked_up":{},"items_left_on_ground":1}
+  the Iron Casing dropped itself (asserted from the break's own drop record)
+```
+
+### Ladder (0.2.4, slot `W3-actuallyadditions`, `CARGO_INCREMENTAL=0`, `BUILD_LOCAL=1`)
+
+| Step | Command | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **31 passed**, 0 failed — `Compiling actuallyadditions v0.2.4` (not a cached artefact) — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| content rule | `tools/check_recipe_keys.py` | red then green (above) — `check-recipe-keys{,-red}.log` |
+| package ×2 | `cargo horizon-mod build`, twice, **lock kept** | **110,156 B** both, `cmp` identical — `sdk-build.log`, `sdk-build-second.log` |
+| registry check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.4 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 110,156 bytes, `f7767eba…dd1d67`, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `cargo horizon-mod fits … --build 0a875da` | `Actually Additions:` / `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` | **1/1** |
+| in-game | `tools/e2e.sh` on the launcher-built game (`--offscreen`) | `PASS` + `EXIT:0` — `actuallyadditions-e2e/e2e-launcher.log` |
+| counterfactual | `NEGATIVE=1` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour) …` + `EXIT:1` — `e2e-launcher-negative.log` |
+| counterfactual | `SELFTEST=1` | `FAIL: SELFTEST flipped: the placed machine kept 2620 FE, not 0` + `EXIT:1` |
+| counterfactual | `SELFTEST=drops` | `FAIL: SELFTEST drops: the payload carries no Items …` + `EXIT:1` |
+| control | the same script on the same Nightly **without** the package | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=5 ok=5` |
+
+Artifact: `actuallyadditions.hmod`, **110,156 B**, sha256
+`f7767ebadf65127b0f0d5b38d0152296051a49243d9b0c98251e54fbaadd1d67`, **103 entries** (0.2.3: 91; the
+12 new data/asset files), `Cargo.lock` packed and equal to the tree's (8,850 B,
+`ef8de232…78e4` — the lock's own `actuallyadditions` version line moved to 0.2.4). The launcher build
+is `native-0a875da-b89ef4c3ade8` (the exported package's README is byte-identical to the tree's), exported to `~/.cache/horizon-e2e/0a875da/actuallyadditions/`, and
+the leg's first line names the sha256 above.
+
+### Coverage (slice 3)
+
+| Family | State |
+|---|---|
+| `actuallyadditions:coal_generator` recipe (`CIC/CAC/CIC`) | **tested** — `recipe give` unlocks 1; the grid crafts 1 machine and consumes all nine items (six cobblestone, two casings, one coal); the grid is empty afterwards |
+| `c:cobblestones` tag | **tested** — its `mossy_cobblestone` member crafts the machine; `stone` (not a member) leaves the result empty; the tool refuses an empty tag file |
+| `actuallyadditions:iron_casing` block + item | **tested** — places and reads back, is give-able, drops itself from its carried loot table (`ctl break`'s own `drops` record), and an undeclared id is refused (`unknown item`) |
+| `actuallyadditions:basic_coil` item | **tested** — give-able and used as a key in the Crusher's blocked recipe; it has no other behaviour |
+| `actuallyadditions:crusher` recipe | **blocked(restonia_crystal_growth)** — registers, `recipe give` unlocks it, and it never crafts (the grid with its crystal cells unfilled stays empty; `give restonia_crystal` is refused) |
+| `iron_casing` / `basic_coil` own recipes | **not carried** — `iron_casing` needs `black_quartz` (the ore is worldgen) and `basic_coil` needs `black_quartz` + `restonia_crystal` (grown, not crafted); a recipe that cannot craft is not shipped as dead data. Added to `tools/recipe-blockers.json`'s rationale in this section, not as files |
+| everything slice 1/2 shipped | unchanged and re-proved in the same run (machines, FE link, break state, operator readout) |
+
+### Deviations and gaps this slice adds
+
+1. **A player cannot yet obtain an Iron Casing or a Basic Coil in survival.** Both are only
+   craftable from `black_quartz` (worldgen) and `restonia_crystal` (grown); the in-game proof
+   supplies them with `give`. The Coal Generator recipe is therefore *correct and craftable* but not
+   yet *reachable* from raw materials — the next two chain pieces close that.
+2. **The Iron Casing is a block, so it has a blockstate/model/loot table**, not just an item; the
+   jar's model is `cube_all` on its own texture and its item model parents the block model.
+3. **`c:cobblestones` carries vanilla's four vanilla members only.** A 1.21.1 pack's tag would also
+   have modded cobblestones; 26.3 has none to name, and `Known::keeps` drops an id a content root
+   does not have, so naming one would only log a removal.
+4. **The block-leg's aim refuses an obstructed line of sight** (`no face of block … is visible from
+   here: … is in the way`) — the casing is placed at `z=-6`, clear of the crafting table at
+   `(20, 100, 8)`.
+
+### Harness facts measured while getting there (worth keeping)
+
+1. **`click-slot` needs a renderer**: the whole leg now launches `--offscreen` (a crafting-table
+   slot click under `--headless` answers "no renderer yet"). The machines and loot legs are
+   unaffected.
+2. **`ctl break` is the drop record**: its reply carries `drops` (counts of the item entities the
+   break made, watched for 20 ticks), `picked_up` (the inventory delta) and `items_left_on_ground`.
+   Reading the ground with `data get entity @e[…]` afterwards races the player's pickup and cost this
+   wave three red runs; the legs now assert the break's own record.
+3. **A player within ~1 block picks an item up after its 10-tick delay** (`getBoundingBox()
+   .inflate(1.0, 0.5, 1.0)`), and a drop drifts: standing two blocks off a machine sometimes put its
+   drop in the inventory before the reads (the drop's advancement fired mid-leg). Break from 3.5
+   blocks.
+4. **`ctl interact` on a vanilla crafting table opens the ordinary inventory screen with
+   `craft_size` 3** — the grid is 100-108 and the result 200, and `ctl screen` lists them.
+5. **`recipe give @s <id>` is a presence test for a recipe**, but it says nothing about whether the
+   recipe can craft: an unknown *item* key leaves it registered and unlockable (the Crusher), while
+   an unknown *tag* had dropped it entirely.
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+**Changelog (0.2.4):**
+
+> **0.2.4 — the crafting chain's first two pieces, and the tag the machine recipes need.** Adds the
+> Iron Casing block and the Basic Coil item (the jar's blockstate, models, textures, loot table and
+> declarations) and the `c:cobblestones` item tag 26.3 does not ship, so the Coal Generator's own
+> recipe resolves and crafts in a vanilla crafting table: six cobblestone (any tag member), two
+> iron casings and a coal make one machine, all consumed. The Crusher's recipe still cannot craft —
+> it waits on `restonia_crystal`, which upstream grows rather than crafts
+> (`blocked(restonia_crystal_growth)`; it registers and the grid stays empty). No Rust change
+> (`src/*.rs` byte-identical); `tools/check_recipe_keys.py` now fails a build whose recipe key names
+> an item or tag the package cannot resolve; the e2e runs `--offscreen` and gains the crafting and
+> block legs. 103 entries, 110,156 B, sha256 `f7767eba…dd1d67`.
+
+## Next slice (0.2.5)
+
+**Family:** the rest of the crafting chain that is *craftable* — the `c:ingots/iron` and
+`c:rods/wooden` item tags, wherever they are needed — starting with **`black_quartz`**, which gates
+both `iron_casing` and `basic_coil`: with it, the two pieces become survival-reachable and their own
+recipes can ship and be crafted.
+
+- **Gap line** (`Deviations and gaps this slice adds`, item 1): *"A player cannot yet obtain an Iron
+  Casing or a Basic Coil in survival. Both are only craftable from `black_quartz` (worldgen) and
+  `restonia_crystal` (grown)…"*
+- **Blocker to check first:** `black_quartz` comes from **Black Quartz Ore**, which is worldgen
+  (`data/actuallyadditions/...` ore + `c:ores/black_quartz`). This pin has a worldgen API
+  (`ARCHITECTURE.md` §8, 2026-11-18: the worldgen-last ruling is lifted), so the question is whether
+  this port's tier (`machines`) should grow an ore: if yes, the `worldgen` slice; if not, a
+  **`black_quartz` item via the crusher's `black_quartz_ore` recipe** stays blocked and the next
+  craftable piece is `restonia_crystal`'s growth (a block/seed mechanic, `machines`-shaped: a
+  water-placed seed that grows — a `random_ticks` block with a growth state, proved by ticking one
+  in game).
+- **In-game assertion that can fail:** for `restonia_crystal` growth: place the seed block in water,
+  tick it, assert the cluster appears and a wrong fluid (lava) does not; for `black_quartz`: mine a
+  generated ore in a loaded chunk and assert the drop, or `give` the item and craft `iron_casing`
+  with `c:rods/wooden` + `c:ingots/iron` (which this slice must then declare).
+- **Out of scope:** the remaining chain (`empowered_*` crystals, the Empowerer), the Double
+  Crusher, the GUI (`blocked(no-single-player-mod-screen)`).
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
