@@ -59,15 +59,26 @@ ORE = "black_quartz_ore"
 GEM = "black_quartz"
 # Slice 5 (0.2.6): the Atomic Reconstructor and the crystal its beam makes. The machine is a
 # full-directional block (`FullyDirectionalBlock.FACING`, six values) whose only state property is
-# `facing`; the result of the redstone conversion is a plain item. The three `laser/` recipes are
-# the ones whose terms this package resolves *for a block*: `#c:dusts/redstone` (a redstone wire's
-# block item is `minecraft:redstone`), `#c:sands` and `minecraft:red_mushroom`. The jar's other
-# laser recipes name items this package does not ship (the other crystals, lenses, relays, ethetic
-# blocks) or turn an item into an item (`leather ← rotten flesh`, `prismarine_shard ← quartz`),
-# which is the beam's item-entity half, not the block half this slice proves.
+# `facing`; the result of the redstone conversion is a plain item. The `laser/` recipes are the ones
+# whose terms this package resolves: `#c:dusts/redstone` (a redstone wire's block item is
+# `minecraft:redstone`), `#c:sands` and `minecraft:red_mushroom` fire through the block half; the
+# rotten-flesh and quartz ones (slice 6, 0.2.7) only match a dropped item, which the beam's item
+# half converts. The jar's other laser recipes name items this package does not ship (the other
+# crystals and their blocks, lenses, relays, ethetic blocks, the canola seed).
 RECONSTRUCTOR = "atomic_reconstructor"
 CRYSTAL = "restonia_crystal"
-LASER_RECIPES = ("crystalize_restonia_crystal", "soul_sand", "nether_wart")
+# Slice 5 carried the three recipes whose terms this package resolves *for a block*; slice 6
+# (0.2.7) adds the two whose terms only ever match a dropped item (`leather ← rotten flesh`,
+# `prismarine_shard ← quartz`), now that the beam's item half converts item entities. The other
+# seventeen name items or blocks this package does not ship (the other crystals and their blocks,
+# the lenses, the relays, the ethetic blocks, the canola seed).
+LASER_RECIPES = (
+    "crystalize_restonia_crystal",
+    "leather",
+    "nether_wart",
+    "prismarine_shard",
+    "soul_sand",
+)
 # NeoForge 1.21.x's `Tags.Items.DUSTS_REDSTONE` and `Tags.Items.SANDS` (26.3 ships no `c:`
 # namespace, so the two tags the machine's recipe and its soul-sand conversion key on are
 # declared here).

@@ -1,5 +1,45 @@
 # Validation
 
+**0.2.7 (2026-11-23, pin `0a875da`)** — slice 6: the beam's **item-entity half**. The Atomic
+Reconstructor's `invokeConversionLens` also converts the **dropped items** in the box from the
+machine to the block it hit (`new AABB(tile, hit + 1).inflate(0.02).expandTowards(facing)`), as many
+of a stack as the buffer pays for, one entity per beam step, its result marked `aa_cnv` — plus the
+two `laser/` recipes whose terms only ever match an item (`rotten_flesh` → leather at 20,000 CF,
+`quartz` → prismarine shard at 30,000 CF). The rules as the artefact states them are in `notes.md` →
+"Slice 6"; the one upstream defect (the box is inverted on `north`/`west`/`down`, so those three
+facings converted no item) is recorded under "Upstream defects fixed" there and fixed here.
+
+| Check | Command | Result |
+|---|---|---|
+| rules (red) | `cargo test --offline` before the implementation | `error[E0425]: cannot find function item_scan_box / items_possible / may_convert` + `cannot find value CONVERTED_MARKER`, 19 errors, exit 101 — `evidence/actuallyadditions/sdk-test-red-item-half.log` |
+| content rule | `python3 tools/check_recipe_keys.py` | `6 recipe(s), 11 craftable, 0 blocked, 0 failure(s)`, exit 0; both new `laser/` files `ok … every ingredient and its result resolve (laser)` — `check-recipe-keys.log` |
+| content carry | `tools/assemble_content.py` + `tools/stamp_license.py` re-run | the two new `laser/` files are the only bytes that moved (140 files before, 142 after) |
+| tests | `cargo test --offline` after `cargo clean -p actuallyadditions` | **50 passed / 0 failed** (20 runtime, 11 reconstructor, 19 glue), `Compiling actuallyadditions v0.2.7` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| package | `cargo horizon-mod build` twice, **lock kept** | **145,399 B** both, `cmp` identical, sha256 `7d35fc805d9e49c05d2cc4e30a1a5f1cc261da0a6d0bf6d3b18b8a5d909bc5e4`, **152 entries with `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.txt` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.7 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 145399 bytes, EXIT 0 — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1** (packed lock, tree match, runtime hash, skills gate) |
+| in-game | `tools/e2e.sh` (`--offscreen`, launcher build `native-0a875da-7ac0c4c42e48`) | `PASS` + `EXIT:0` — `actuallyadditions-e2e/e2e-launcher.log` |
+| counterfactual | `SELFTEST=item` | `FAIL: SELFTEST item: the beam converted the dropped item (the real assertion); …` + `EXIT:1` — `e2e-launcher-selftest-item.log` |
+| counterfactual | `SELFTEST=laser` | `FAIL: SELFTEST laser: …` + `EXIT:1` |
+| counterfactual | `SELFTEST=1` | `FAIL: SELFTEST flipped: the placed machine kept 2540 FE, not 0` + `EXIT:1` |
+| counterfactual | `SELFTEST=ore` | `FAIL: SELFTEST ore: …` + `EXIT:1` |
+| counterfactual | `NEGATIVE=1` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked …` + `EXIT:1` |
+| control | `GAME=$CONTROL_GAME` (same Nightly, no package) | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` |
+| log audit | `python3 ports/tools/check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=7 ok=7` |
+
+In game the item half prints (from `e2e-launcher.log`): the dropped item settled at
+`[2.5,100.0,20.5]`; after the shot `1 restonia crystal(s), 0 redstone left`; the converted entity's
+`Tags` read `["aa_cnv"]`; the differential item two blocks across the beam stayed redstone with the
+buffer at `40/300000 CF`; a stack of three gave `1 crystal(s), 2 redstone left`, the leftover
+unmarked; a **west**-facing beam converted its item too (the fixed defect); rotten flesh → `1
+leather` at 20,000 CF and quartz → `1 shard` at 30,000 CF. The launcher build is
+`native-0a875da-7ac0c4c42e48`, exported to `~/.cache/horizon-e2e/0a875da/actuallyadditions/`, and the
+leg's first line names the delivered sha256. The 0.2.6 block below is superseded.
+
 **0.2.6 (2026-11-23, pin `0a875da`)** — slice 5: the Atomic Reconstructor (a facing block entity, a
 300,000 CF buffer, a lens slot, a 100-tick cycle, a ten-block beam converting the 3×3 plane it hits)
 and the three block-reachable `laser/` recipes it fires, the `restonia_crystal` item, the

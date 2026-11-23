@@ -60,6 +60,14 @@
 #    CF, red mushroom → a nether wart crop at 150,000 CF; both results are blocks, so the beam
 #    places them, as upstream's `BlockItem` branch does). The Crusher's recipe, uncraftable until the beam
 #    could make a crystal, now crafts (tools/craft_check.py);
+#  - (0.2.7) the beam's item half: a dropped redstone item in the beam becomes a Restonia Crystal
+#    (count conserved, the buffer paying the 1,000 CF gate plus the recipe's 40 CF, and the output
+#    entity carrying upstream's `aa_cnv` marker so a later beam step cannot convert it again); the
+#    same item two blocks across the beam stays redstone (the differential); a stack of three
+#    converts exactly one and leaves two, the remainder unmarked; a west-facing beam converts its
+#    item too (upstream's box is inverted on that facing); and the two `laser/` recipes whose terms
+#    only ever match a dropped item convert at their own energy (rotten flesh -> leather at 20,000
+#    CF, quartz -> prismarine shard at 30,000 CF);
 #  - with CONTROL_GAME set, an unmodded game on the same scratch home knows neither id
 #    (`setblock` answers `Unknown block type`), so the ids are the package's.
 #
@@ -68,12 +76,13 @@
 # which passes only on the defect this version fixes, so it must fail too; SELFTEST=ore flips the
 # ore's drop assertion ("the generated ore drops nothing"), which the carried table makes false, so
 # it must fail; SELFTEST=laser flips the beam's crystal assertion ("the beam makes nothing"), which
-# the restonia conversion makes false, so it must fail. NEGATIVE=1 flips the crafting phase's
-# recipe-book assertion ("the Coal Generator's recipe is not unlocked"), which is the pre-0.2.4
-# state, so it must fail on this package.
+# the restonia conversion makes false, so it must fail; SELFTEST=item flips the item half's assertion
+# ("the beam converts no dropped item"), which the drop makes false, so it must fail. NEGATIVE=1
+# flips the crafting phase's recipe-book assertion ("the Coal Generator's recipe is not unlocked"),
+# which is the pre-0.2.4 state, so it must fail on this package.
 #
 #   GAME=<launcher-built horizon-client> [CTL=<horizon-ctl>] [CONTROL_GAME=<unmodded game>] \
-#       [SELFTEST=1|drops|ore|laser] [NEGATIVE=1] tools/e2e.sh
+#       [SELFTEST=1|drops|ore|laser|item] [NEGATIVE=1] tools/e2e.sh
 set -euo pipefail
 export LC_ALL=C
 
@@ -1415,6 +1424,135 @@ ctl wait 120
 expect_block "$((WART_X + 1))" 100 "$WART_Z" minecraft:nether_wart
 line=$(info "$WART_X" 100 "$WART_Z")
 [ "$(energy_of "$line")" = 0 ] || fail "the 150,000 CF conversion did not leave an empty buffer: $line"
+# K: the beam's item half (0.2.7). `MethodHandler.invokeConversionLens` converts the blocks of the
+# plane first and then the *dropped items* in the box from the machine to the block the beam hit
+# (`new AABB(tile, hit + 1).inflate(0.02).expandTowards(facing)`), one entity per beam step, as many
+# items as the buffer can pay for, the output marked `aa_cnv` so it is never converted twice. A
+# dropped item is summoned with its pickup delay at vanilla's sentinel so the player cannot collect
+# the evidence, and the player stands four blocks off (a spawned result has a ten-tick delay).
+echo "== the beam's item half: dropped items convert, one entity per step (0.2.7) =="
+# `kill @e[type=item]` clears the previous phase's drops; the summon puts one stack where the beam
+# looks. `PickupDelay:32767s` is vanilla's "never", so neither the input nor the output is collected.
+drop_item() { # drop_item ITEM COUNT X Y Z
+    ctl command "kill @e[type=item]" >/dev/null
+    ctl command "summon minecraft:item $3 $4 $5 {Item:{id:\"$1\",count:$2},PickupDelay:32767s}" >/dev/null
+    ctl wait 10
+}
+# `data get entity … Tags` is how the marker is read back: upstream's `aa_cnv` persistent-data flag
+# is this entity's scoreboard tag here (the pin has no entity persistent-data surface).
+tag_of() { # tag_of ITEM
+    ctl command "data get entity @e[type=minecraft:item,nbt={Item:{id:\"$1\"}},limit=1,sort=nearest] Tags" 2>&1 || true
+}
+
+ITEM_Z1=20
+# K1: one dropped redstone in the beam becomes one Restonia Crystal; the buffer pays the 1,000 CF
+# gate plus the recipe's 40 CF and the item's count is conserved.
+ITEM_X=0
+ctl command "setblock $ITEM_X 100 $ITEM_Z1 actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+drop_item minecraft:redstone 1 "$(centre "$((ITEM_X + 2))")" 100 "$(centre "$ITEM_Z1")"
+ctl tp "$((ITEM_X + 6)).5" 100 "$(centre "$ITEM_Z1")" >/dev/null
+SETTLED=$(ctl entities 12 item | jq -c '[.entities[] | {item: .item.item, count: (.item.count // 1), pos, distance}]')
+echo "  the dropped item settled: $SETTLED"
+[ "$(ground minecraft:redstone)" = 1 ] || fail "the dropped redstone is not in the world: $SETTLED"
+charge "$ITEM_X" 100 "$ITEM_Z1" 1040 >/dev/null
+ctl wait 120
+CONVERTED=$(ground actuallyadditions:restonia_crystal)
+LEFT=$(ground minecraft:redstone)
+echo "  after the shot: $CONVERTED restonia crystal(s), $LEFT redstone left"
+if [ "$SELFTEST" = item ]; then
+    # The counterfactual: the flipped assertion says the beam converts no dropped item. It passes
+    # only on a machine without the item half, so this run must fail.
+    [ "$CONVERTED" = 0 ] || fail "SELFTEST item: the beam converted the dropped item (the real assertion); the flipped assertion 'it converts none' fails, so the real one can fail"
+    fail "SELFTEST item: the flipped assertion passed (nothing converted), so it proves nothing"
+fi
+[ "$CONVERTED" = 1 ] || fail "the beam did not convert the dropped redstone ($CONVERTED crystals; $LEFT redstone; items: $(ctl entities 12 item | jq -c '[.entities[] | .item.item]'))"
+[ "$LEFT" = 0 ] || fail "the converted redstone is still on the ground ($LEFT)"
+TAGS=$(tag_of actuallyadditions:restonia_crystal)
+echo "  the converted item's tags: $TAGS"
+case "$TAGS" in
+    *aa_cnv*) ;;
+    *) fail "the converted item carries no aa_cnv marker, so a later beam step would convert it again: $TAGS" ;;
+esac
+line=$(info "$ITEM_X" 100 "$ITEM_Z1")
+echo "  after the item shot: $line"
+[ "$(energy_of "$line")" = 0 ] || fail "1,040 CF was not the gate plus one 40 CF conversion: $line"
+
+# K2: the differential — the same dropped item outside the beam's box stays redstone, and the shot
+# still spends its 1,000 CF gate. The item sits two blocks across the beam, outside the box's one.
+DIFF_X=6
+ctl command "setblock $DIFF_X 100 $ITEM_Z1 actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+drop_item minecraft:redstone 1 "$(centre "$((DIFF_X + 2))")" 100 "$(centre "$((ITEM_Z1 + 2))")"
+ctl tp "$((DIFF_X + 6)).5" 100 "$(centre "$ITEM_Z1")" >/dev/null
+echo "  the differential's item (two blocks across the beam): $(ctl entities 12 item | jq -c '[.entities[] | {item: .item.item, count: (.item.count // 1), pos, distance}]')"
+[ "$(ground minecraft:redstone)" = 1 ] || fail "the differential's redstone is not in the world"
+charge "$DIFF_X" 100 "$ITEM_Z1" 1040 >/dev/null
+ctl wait 120
+[ "$(ground minecraft:redstone)" = 1 ] \
+    || fail "an item outside the beam's box was converted ($(ctl entities 12 item | jq -c '[.entities[] | .item.item]'))"
+[ "$(ground actuallyadditions:restonia_crystal)" = 0 ] || fail "the differential shot made a crystal"
+line=$(info "$DIFF_X" 100 "$ITEM_Z1")
+echo "  the differential after its shot: $line"
+[ "$(energy_of "$line")" = 40 ] \
+    || fail "the differential's shot did not spend exactly its 1,000 CF gate: $line"
+
+# K3: a stack of three at 1,040 CF converts exactly one and leaves two — upstream's
+# `min(energy / recipe.energy, count)` — and the remainder is never marked.
+STACK_X=10
+ctl command "setblock $STACK_X 100 $ITEM_Z1 actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+drop_item minecraft:redstone 3 "$(centre "$((STACK_X + 2))")" 100 "$(centre "$ITEM_Z1")"
+ctl tp "$((STACK_X + 6)).5" 100 "$(centre "$ITEM_Z1")" >/dev/null
+charge "$STACK_X" 100 "$ITEM_Z1" 1040 >/dev/null
+ctl wait 120
+STACK_CRYSTALS=$(ground actuallyadditions:restonia_crystal)
+STACK_LEFT=$(ground minecraft:redstone)
+echo "  three redstone at 1,040 CF: $STACK_CRYSTALS crystal(s), $STACK_LEFT redstone left"
+[ "$STACK_CRYSTALS" = 1 ] || fail "1,040 CF converted $STACK_CRYSTALS of a stack of three, not one"
+[ "$STACK_LEFT" = 2 ] || fail "the remainder of the converted stack is $STACK_LEFT, not two"
+LEFT_TAGS=$(tag_of minecraft:redstone)
+echo "  the leftover input's tags: $LEFT_TAGS"
+case "$LEFT_TAGS" in
+    *aa_cnv*) fail "the leftover input was marked aa_cnv, so it could never convert: $LEFT_TAGS" ;;
+esac
+
+# K4: a west-facing beam converts its dropped item too — upstream's box is inverted on this facing
+# and vanilla intersects nothing with it, which the port's ordered box fixes (notes.md, "Upstream
+# defects fixed").
+WEST_X=14
+ctl command "setblock $WEST_X 100 $ITEM_Z1 actuallyadditions:atomic_reconstructor[facing=west]" >/dev/null
+drop_item minecraft:redstone 1 "$(centre "$((WEST_X - 2))")" 100 "$(centre "$ITEM_Z1")"
+ctl tp "$((WEST_X - 6)).5" 100 "$(centre "$ITEM_Z1")" >/dev/null
+charge "$WEST_X" 100 "$ITEM_Z1" 1040 >/dev/null
+ctl wait 120
+WEST_CRYSTALS=$(ground actuallyadditions:restonia_crystal)
+echo "  a west-facing beam's dropped item: $WEST_CRYSTALS crystal(s), $(ground minecraft:redstone) redstone left"
+[ "$WEST_CRYSTALS" = 1 ] || fail "a west-facing beam converted no dropped item ($WEST_CRYSTALS crystals)"
+
+# K5/K6: the two `laser/` recipes whose terms only ever match a dropped item, at their own energy on
+# top of the 1,000 CF gate: rotten flesh -> leather at 20,000, quartz -> prismarine shard at 30,000.
+ITEM_Z2=24
+LEATHER_X=0
+ctl command "setblock $LEATHER_X 100 $ITEM_Z2 actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+drop_item minecraft:rotten_flesh 1 "$(centre "$((LEATHER_X + 2))")" 100 "$(centre "$ITEM_Z2")"
+ctl tp "$((LEATHER_X + 6)).5" 100 "$(centre "$ITEM_Z2")" >/dev/null
+charge "$LEATHER_X" 100 "$ITEM_Z2" 21000 >/dev/null
+ctl wait 120
+LEATHER=$(ground minecraft:leather)
+echo "  rotten flesh -> leather at 20,000 CF: $LEATHER leather, $(ground minecraft:rotten_flesh) rotten flesh left"
+[ "$LEATHER" = 1 ] || fail "the 20,000 CF leather conversion made no leather ($LEATHER)"
+line=$(info "$LEATHER_X" 100 "$ITEM_Z2")
+[ "$(energy_of "$line")" = 0 ] || fail "the 20,000 CF conversion did not leave an empty buffer: $line"
+SHARD_X=8
+ctl command "setblock $SHARD_X 100 $ITEM_Z2 actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+drop_item minecraft:quartz 1 "$(centre "$((SHARD_X + 2))")" 100 "$(centre "$ITEM_Z2")"
+ctl tp "$((SHARD_X + 6)).5" 100 "$(centre "$ITEM_Z2")" >/dev/null
+charge "$SHARD_X" 100 "$ITEM_Z2" 31000 >/dev/null
+ctl wait 120
+SHARDS=$(ground minecraft:prismarine_shard)
+echo "  quartz -> prismarine shard at 30,000 CF: $SHARDS shard(s), $(ground minecraft:quartz) quartz left"
+[ "$SHARDS" = 1 ] || fail "the 30,000 CF prismarine conversion made no shard ($SHARDS)"
+line=$(info "$SHARD_X" 100 "$ITEM_Z2")
+[ "$(energy_of "$line")" = 0 ] || fail "the 30,000 CF conversion did not leave an empty buffer: $line"
+
 ctl command "clear @s" >/dev/null
 ctl command "kill @e[type=item]" >/dev/null
 ctl command "gamemode creative @s" >/dev/null
@@ -1422,4 +1560,4 @@ ctl wait 4
 
 control
 
-echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed"
+echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed"

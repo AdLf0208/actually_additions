@@ -512,6 +512,66 @@ pub fn conversion_plane(hit: [i32; 3], facing: Facing) -> Vec<[i32; 3]> {
     plane
 }
 
+/// Upstream `MethodHandler.invokeConversionLens`'s `aabb.inflate(0.02, 0.02, 0.02)`: the slack
+/// the item box takes on every side.
+const ITEM_BOX_INFLATE: f64 = 0.02;
+/// Upstream's `aa_cnv` persistent-data flag, as a vanilla scoreboard tag (the pin has no entity
+/// persistent-data surface; `Entity.getTags` is saved with the entity and readable in game). A
+/// converted item carries it, so the beam never converts the same entity twice.
+pub const CONVERTED_MARKER: &str = "aa_cnv";
+
+/// The box a dropped item must be in to be converted by one beam step, from the machine's own
+/// block to the block the beam hit plus one, inflated by 0.02 and carried one block further along
+/// the facing (`new AABB(tile, hit + 1).inflate(0.02).expandTowards(dir)`).
+///
+/// Upstream passes the machine as the minimum and `hit + 1` as the maximum, which `AABB` does not
+/// order: on a `north`, `west` or `down` beam that box is inverted and vanilla intersects nothing
+/// with it, so those three facings convert no dropped item. This one is ordered and extends the
+/// end away from the machine — upstream's own numbers for `east`/`south`/`up`, the mirrored,
+/// working case for the other three (see `notes.md`, "Upstream defects fixed").
+#[must_use]
+pub fn item_scan_box(tile: [i32; 3], hit: [i32; 3], facing: Facing) -> ([f64; 3], [f64; 3]) {
+    let mut min = [0.0; 3];
+    let mut max = [0.0; 3];
+    for axis in 0..3 {
+        let machine = f64::from(tile[axis]);
+        let hit_end = f64::from(hit[axis]) + 1.0;
+        min[axis] = machine.min(hit_end) - ITEM_BOX_INFLATE;
+        max[axis] = machine.max(hit_end) + ITEM_BOX_INFLATE;
+    }
+    // `expandTowards`: one more block on the beam's own side, i.e. the far end of the box.
+    let step = facing.offset();
+    for axis in 0..3 {
+        if step[axis] > 0 {
+            max[axis] += f64::from(step[axis]);
+        } else if step[axis] < 0 {
+            min[axis] += f64::from(step[axis]);
+        }
+    }
+    (min, max)
+}
+
+/// How many items one beam step converts: `Math.min(tile.getEnergy() / recipe.getEnergy(),
+/// stack.getCount())`, with `energy` the buffer left after the shot's gate. A recipe with no cost
+/// converts the whole stack — upstream would divide by zero there, which is a defect, not a rule.
+#[must_use]
+pub fn items_possible(energy: i32, recipe_energy: i32, count: u32) -> u32 {
+    let count = u64::from(count);
+    let affordable = if recipe_energy <= 0 {
+        count
+    } else {
+        u64::try_from(energy.max(0)).unwrap_or(0) / u64::try_from(recipe_energy).unwrap_or(u64::MAX)
+    };
+    u32::try_from(affordable.min(count)).unwrap_or(0)
+}
+
+/// Whether a scanned dropped stack may be converted: not empty, and not one the beam's own
+/// conversion already marked (`!item.getPersistentData().getBoolean("aa_cnv")`).
+#[must_use]
+pub fn may_convert(tags: &[String], count: u32) -> bool {
+    count > 0 && !tags.iter().any(|tag| tag == CONVERTED_MARKER)
+}
+
 /// `BlockAtomicReconstructor.getAnalogOutputSignal`: `clamp(energy / 20000, 0, 15)`.
 #[must_use]
 pub fn reconstructor_comparator(energy: i32) -> i32 {
@@ -820,6 +880,122 @@ mod reconstructor_tests {
             north.iter().all(|at| at[2] == 0),
             "a north beam converts the plane across x and y"
         );
+    }
+
+    /// Whether a box holds a point, as vanilla's `AABB.contains` does.
+    fn holds(boxes: ([f64; 3], [f64; 3]), at: [f64; 3]) -> bool {
+        let (min, max) = boxes;
+        (0..3).all(|axis| min[axis] <= at[axis] && at[axis] <= max[axis])
+    }
+
+    #[test]
+    fn the_item_box_runs_from_the_machine_to_a_block_past_the_hit_block() {
+        // `new AABB(tile, hit + 1).inflate(0.02).expandTowards(facing)` plus the ordering fix:
+        // the machine at 0, the hit block at 5, so the box spans 0..6 and one further to 7.
+        let east = item_scan_box([0, 100, 0], [5, 100, 0], Facing::East);
+        assert!(
+            holds(east, [2.5, 100.0, 0.5]),
+            "an item between the machine and the hit block is in the beam's box: {east:?}"
+        );
+        assert!(
+            holds(east, [6.5, 100.5, 0.5]),
+            "the box reaches one block past the hit block (upstream's expandTowards): {east:?}"
+        );
+        assert!(
+            !holds(east, [7.5, 100.5, 0.5]),
+            "and no further than that: {east:?}"
+        );
+        assert!(
+            !holds(east, [2.5, 100.0, 2.5]),
+            "the box is one block deep across the beam: {east:?}"
+        );
+
+        // The three negative facings are where upstream's AABB is inverted and matches nothing;
+        // the port's box is ordered and mirrored, so a west beam converts its own items.
+        let west = item_scan_box([10, 100, 0], [5, 100, 0], Facing::West);
+        assert!(
+            (0..3).all(|axis| west.0[axis] <= west.1[axis]),
+            "a west beam's box is not inverted: {west:?}"
+        );
+        assert!(
+            holds(west, [7.0, 100.0, 0.5]),
+            "an item between a west-facing machine and its hit block: {west:?}"
+        );
+        assert!(
+            holds(west, [5.5, 100.0, 0.5]),
+            "a west beam's box reaches a block beyond its hit-side end: {west:?}"
+        );
+        assert!(!holds(west, [4.5, 100.0, 0.5]), "{west:?}");
+
+        let north = item_scan_box([0, 100, 10], [0, 100, 5], Facing::North);
+        assert!(
+            (0..3).all(|axis| north.0[axis] <= north.1[axis]),
+            "{north:?}"
+        );
+        assert!(holds(north, [0.5, 100.0, 7.0]), "{north:?}");
+
+        let down = item_scan_box([0, 110, 0], [0, 105, 0], Facing::Down);
+        assert!((0..3).all(|axis| down.0[axis] <= down.1[axis]), "{down:?}");
+        assert!(holds(down, [0.5, 107.0, 0.5]), "{down:?}");
+        let up = item_scan_box([0, 100, 0], [0, 105, 0], Facing::Up);
+        assert!((0..3).all(|axis| up.0[axis] <= up.1[axis]), "{up:?}");
+        assert!(holds(up, [0.5, 107.0, 0.5]), "{up:?}");
+    }
+
+    #[test]
+    fn a_shot_converts_as_many_items_as_the_recipe_and_the_buffer_allow() {
+        // `Math.min(energy / recipe.getEnergy(), stack.getCount())`, after the 1,000 CF gate.
+        assert_eq!(items_possible(40, 40, 1), 1, "one redstone for 40 CF");
+        assert_eq!(
+            items_possible(40, 40, 3),
+            1,
+            "40 CF converts one item of a stack of three, not all three"
+        );
+        assert_eq!(items_possible(120, 40, 3), 3, "120 CF converts the stack");
+        assert_eq!(items_possible(39, 40, 1), 0, "39 CF converts nothing");
+        assert_eq!(
+            items_possible(20_000, 20_000, 1),
+            1,
+            "rotten flesh at 20,000"
+        );
+        assert_eq!(
+            items_possible(30_000, 30_000, 2),
+            1,
+            "30,000 CF converts one quartz of two"
+        );
+        assert_eq!(
+            items_possible(1_000_000, 40, 64),
+            64,
+            "the stack's own count caps the conversion"
+        );
+        assert_eq!(
+            items_possible(0, 0, 5),
+            5,
+            "a zero-cost recipe converts the stack (upstream would divide by zero)"
+        );
+        assert_eq!(
+            items_possible(-10, 40, 1),
+            0,
+            "a negative buffer converts nothing"
+        );
+    }
+
+    #[test]
+    fn a_converted_item_carries_the_marker_and_is_not_converted_again() {
+        assert_eq!(
+            CONVERTED_MARKER, "aa_cnv",
+            "upstream's own persistent-data key"
+        );
+        assert!(may_convert(&[], 1), "a fresh dropped item may convert");
+        assert!(
+            !may_convert(&["aa_cnv".to_owned()], 1),
+            "an item the beam already converted is skipped"
+        );
+        assert!(
+            may_convert(&["other".to_owned()], 1),
+            "an unrelated tag does not skip it"
+        );
+        assert!(!may_convert(&[], 0), "an empty stack is skipped");
     }
 
     #[test]

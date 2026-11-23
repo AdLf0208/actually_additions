@@ -21,11 +21,12 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, CrushResult, Crusher, CrushingRecipe,
-    GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, LaserRecipe, RECONSTRUCTOR_CAPACITY,
-    RECONSTRUCTOR_LENS_DISTANCE, RECONSTRUCTOR_MAX_INSERT, RECONSTRUCTOR_TICKS, Reconstructor,
-    Step, bonus_for, can_crush, clamp_energy, comparator_strength, conversion_plane,
-    facing_for_placement, ingredient_json, is_fuel, reconstructor_comparator, restored_crusher,
+    CONVERTED_MARKER, CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, CrushResult, Crusher,
+    CrushingRecipe, GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, LaserRecipe,
+    RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_LENS_DISTANCE, RECONSTRUCTOR_MAX_INSERT,
+    RECONSTRUCTOR_TICKS, Reconstructor, Step, bonus_for, can_crush, clamp_energy,
+    comparator_strength, conversion_plane, facing_for_placement, ingredient_json, is_fuel,
+    item_scan_box, items_possible, may_convert, reconstructor_comparator, restored_crusher,
     restored_generator, restored_reconstructor,
 };
 
@@ -56,6 +57,9 @@ const OUTPUT_ONE: usize = 1;
 const OUTPUT_TWO: usize = 2;
 /// Vanilla's stack limit, for an item this world does not know.
 const DEFAULT_STACK: u32 = 64;
+/// Vanilla's default pickup delay for a freshly spawned item (`ItemEntity.setDefaultPickUpDelay`),
+/// which is what upstream's `new ItemEntity(level, x, y, z, stack)` gives a converted item.
+const CONVERTED_PICKUP_DELAY: u32 = 10;
 /// The response of a status read where no machine stands.
 const NO_MACHINE: &str = "No Actually Additions machine there.";
 
@@ -748,9 +752,113 @@ fn fire_beam(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], state: &
             pos[2] + step[2] * distance,
         ];
         convert_plane(host, level, hit, facing, state);
+        convert_items(host, level, pos, hit, facing, state);
         let solid = block_id(&*host, level, hit).is_some_and(|id| !is_air(&id));
         if solid || distance == RECONSTRUCTOR_LENS_DISTANCE {
             break;
+        }
+    }
+}
+
+/// `MethodHandler.invokeConversionLens`'s item half: the dropped items in the box between the
+/// machine and the block the beam hit, of which one entity per beam step is converted (upstream
+/// `break`s after the first). A stack larger than the buffer can pay for converts the affordable
+/// part and keeps its remainder as an input entity; the output carries [`CONVERTED_MARKER`] so a
+/// later step (whose box has grown) cannot convert it again.
+fn convert_items(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    hit: [i32; 3],
+    facing: crate::runtime::Facing,
+    state: &mut Reconstructor,
+) {
+    let (min, max) = item_scan_box(pos, hit, facing);
+    let Some(entities) = level.entities_in(&*host, min, max) else {
+        return;
+    };
+    for entity in entities {
+        let Some(item) = host.item_entity(entity) else {
+            continue;
+        };
+        let Some(stack) = item.stack(&*host) else {
+            continue;
+        };
+        let tags = entity.tags(&*host).unwrap_or_default();
+        if !may_convert(&tags, stack.count()) {
+            continue;
+        }
+        let Some(recipe) = find_laser_recipe(&*host, &stack) else {
+            continue;
+        };
+        let items = items_possible(state.energy, recipe.energy, stack.count());
+        if items == 0 {
+            continue;
+        }
+        if convert_item(host, level, entity, item, stack, &recipe, items) {
+            state.spend(
+                recipe
+                    .energy
+                    .saturating_mul(i32::try_from(items).unwrap_or(i32::MAX)),
+            );
+            return;
+        }
+    }
+}
+
+/// One dropped item's conversion: the recipe's result at `items` copies (upstream overwrites the
+/// result's own count with it), the input entity keeping what is left of the stack. A whole-stack
+/// conversion rewrites the entity in place; a partial one leaves the remainder on it and spawns the
+/// output beside it, which is what upstream's discard-and-respawn pair amounts to.
+fn convert_item(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    entity: mod_api::EntityRef,
+    item: mod_api::ItemEntityRef,
+    stack: ItemStack,
+    recipe: &LaserRecipe,
+    items: u32,
+) -> bool {
+    let result_json = recipe.result.to_string();
+    let Some(result) = host.recipe_result(&result_json).ok().flatten() else {
+        return false;
+    };
+    let mut output = result;
+    if output.set_count(items).is_err() {
+        return false;
+    }
+    let Some(position) = entity.position(&*host) else {
+        return false;
+    };
+    match stack.shrink(items) {
+        // The whole stack converts: the entity becomes the result.
+        None => {
+            if !item.set_stack(host, output).unwrap_or(false) {
+                return false;
+            }
+            entity.add_tag(host, CONVERTED_MARKER);
+            true
+        }
+        // Some of it stays: the entity keeps the remainder, the result joins it.
+        Some(remainder) => {
+            if !item.set_stack(host, remainder).unwrap_or(false) {
+                return false;
+            }
+            let spawned = level
+                .spawn_item(
+                    host,
+                    position[0],
+                    position[1],
+                    position[2],
+                    output,
+                    CONVERTED_PICKUP_DELAY,
+                )
+                .ok()
+                .flatten();
+            if let Some(spawned) = spawned {
+                spawned.add_tag(host, CONVERTED_MARKER);
+            }
+            true
         }
     }
 }

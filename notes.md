@@ -1642,7 +1642,7 @@ first line names the sha above, so the game ran the delivered archive.
 | the Crusher's recipe (chain closed) | **tested** — crafts one machine from 2 crystals + 2 flint + 2 cobblestone + 2 coils + 1 casing, all consumed |
 | break keeps the buffer | **tested** — the drop's payload is `{id, energy: 5000}`, placing it again reads 5,000 |
 | the lens slot | **not ported** — no item in this package is an `ILensItem` (1.3.26's only lens source is the reconstructor's own four-recipe lens cycle, which needs a lens to start); the slot is declared, nothing can fill it, and the click refuses every item |
-| the beam's item-entity half | **not ported (next slice)** — upstream also converts dropped items in the box between the machine and the hit block; the pin can enumerate them (`LevelRef::entities_in`), but this slice is the block half |
+| the beam's item-entity half | **closed by slice 6 (0.2.7)** — upstream also converts dropped items in the box between the machine and the hit block; the pin enumerates them (`LevelRef::entities_in`). See "Slice 6" below |
 | comparator output | **not ported** — the strength is computed and printed; no `has_analog_output` hook is declared |
 | the beam's visual + the block-break level event | **not ported** — no packet, no `levelEvent(2001)`; the conversion is state-only |
 | the `reset/` recipe type and pulse mode | **not carried** — AA's own `actuallyadditions:reset` recipe type and the pulse-mode component are another slice (a wrench/redstone-control family) |
@@ -1724,3 +1724,230 @@ the two `laser/` recipes that can only work on items (`minecraft:rotten_flesh` �
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
 
+
+## Slice 6 (0.2.7, 2026-11-23) — the beam's item-entity half
+
+**Family:** the **dropped items the Atomic Reconstructor's beam converts** — the other thing
+`MethodHandler.invokeConversionLens` does — plus the two `laser/` recipes whose terms only ever
+match an item (`minecraft:rotten_flesh` → `minecraft:leather` at 20,000 CF, `minecraft:quartz` →
+`minecraft:prismarine_shard` at 30,000 CF).
+
+- **Gap line** (the slice-5 coverage table, `notes.md:1645`): *"the beam's item-entity half — not
+  ported (next slice): upstream also converts dropped items in the box between the machine and the
+  hit block; the pin can enumerate them (`LevelRef::entities_in`), but this slice is the block half"*.
+  The 0.2.6 plan had recorded it as `blocked(no-entity-box-query)`; `LevelRef::entities_in` is that
+  query, so the blocker is gone.
+- **Why it fits `machines`:** no new block, item, model, texture or hook — a rule inside the machine
+  this port already ships (its beam), proven through it.
+- **Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
+  `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
+
+### The item-half rules as the artefact states them (`MethodHandler.invokeConversionLens`)
+
+| Rule | Value | Source |
+|---|---|---|
+| **order** | the **block loop runs first**, then the **item loop**, both inside one `invoke` call — and `invoke` is called once per beam step, so the item half runs at *every* step with a box that grows as the beam walks | `MethodHandler.java:177-275` (blocks), `:277-314` (items), `:281-303` (the walk) |
+| box | `new AABB(tile.x, tile.y, tile.z, hit.x + 1, hit.y + 1, hit.z + 1)`, then `.inflate(0.02, 0.02, 0.02)` and `.expandTowards(dir)` with the facing's normal — from the machine's own block corner to the hit block's far corner, 0.02 of slack, plus **one block further along the beam** | `:277-280` |
+| which entities | `getEntitiesOfClass(ItemEntity.class, aabb)` — dropped items only, in the level's entity-list order | `:281` |
+| skip | `!item.isAlive() \|\| stack.isEmpty() \|\| item.getPersistentData().getBoolean("aa_cnv")` | `:283` |
+| recipe | the same `LaserRecipe.getRecipeForStack(stack)` the block half uses — first match, engine order | `:285`, `LaserRecipe.java:94` |
+| how many | `Math.min(tile.getEnergy() / recipe.getEnergy(), stack.getCount())` — the buffer is the one left after the shot's 1,000 CF gate | `:290` |
+| the conversion | `item.discard()`; a leftover is re-spawned as a new input entity at the item's own x/y/z; the result is spawned there with `setCount(itemsPossible)` and marked `aa_cnv`; `extractEnergy(recipe.energy × itemsPossible)` | `:291-308` |
+| how many entities | `break` after the first entity that converts — **one item entity per `invoke`**, i.e. per beam step (up to 10 a shot) | `:310` |
+| result count | `outputCopy.setCount(itemsPossible)` **overwrites** the recipe result's own count (all five carried results declare 1, so nothing observable changes) | `:302` |
+| return | `!hitState.isAir()` — the block half's stop condition; the item half is not gated on the beam hitting air | `:314` |
+
+Consequences the leg asserts: at 1,040 CF the buffer pays the gate and leaves 40, which is one 40 CF
+conversion — one dropped redstone becomes one Restonia Crystal and the buffer is empty; a stack of
+three converts **one** and leaves two; an item outside the box is untouched while the shot still
+spends its 1,000 CF gate (40 left).
+
+### The marker: upstream's `aa_cnv` as a vanilla scoreboard tag
+
+Upstream stores a boolean in the entity's NeoForge **persistent data**. The pin has no
+entity-persistent-data surface, so the port uses the closest exact analogue: the entity's **vanilla
+scoreboard tags** (`Entity.addTag`/`getTags`, API 386 — saved with the entity and readable in game as
+`/data get entity … Tags`), under upstream's own key, `aa_cnv`. The marker goes on the **output**
+entity only, so a converted item is never converted again by a later beam step (whose box has grown)
+or a later shot, while the leftover of a partially converted stack stays convertible — which is what
+upstream's flag does too.
+
+### TDD
+
+The three rules were written as failing tests first (functions absent, so the red is the compile
+error — the 0.2.5/0.2.6 precedent), `evidence/actuallyadditions/sdk-test-red-item-half.log`:
+
+```text
+error[E0425]: cannot find function `item_scan_box` in this scope
+error[E0425]: cannot find function `items_possible` in this scope
+error[E0425]: cannot find function `may_convert` in this scope
+error[E0425]: cannot find value `CONVERTED_MARKER` in this scope
+error: could not compile `actuallyadditions` (lib test) due to 19 previous errors
+```
+
+Green: **50 passed** (20 runtime, 11 reconstructor — three new: `the_item_box_runs_from_the_machine_to_a_block_past_the_hit_block`,
+`a_shot_converts_as_many_items_as_the_recipe_and_the_buffer_allow`,
+`a_converted_item_carries_the_marker_and_is_not_converted_again`).
+
+The content half's rule is `tools/check_recipe_keys.py`, which now reads both new `laser/` files:
+`6 recipe(s), 11 craftable, 0 blocked, 0 failure(s)` (`check-recipe-keys.log`). It cannot be red for
+two vanilla terms — the in-game leg is this family's red (below).
+
+### Upstream defects fixed
+
+**1. The item box is inverted on three of the six facings.** `AABB(x1, y1, z1, x2, y2, z2)` does not
+order its corners and vanilla's `Level.getEntitiesOfClass` only matches an entity whose box
+`intersects` it — and `AABB.intersects` is false for a box whose minimum is above its maximum.
+Upstream passes the machine's position as the **minimum** and `hitBlock + 1` as the **maximum**
+(`MethodHandler.java:278`), so on a `north`, `west` or `down` beam (`hit.x + 1 < tile.x`) the box is
+inverted and **nothing** matches: those three facings convert no dropped item at all, while `east`,
+`south` and `up` do. `expandTowards` moves a *raw* face afterwards and cannot rescue it.
+
+- **Proved from the artefact:** the constructor takes the two corners in that order and `AABB`
+  performs no normalisation; `Level.getEntitiesOfClass` filters with `aabb.intersects`.
+- **What the port does instead:** `runtime::item_scan_box` orders the two corners and extends the
+  face **away from the machine** by one block — byte-for-byte upstream's own numbers for
+  `east`/`south`/`up`, and the mirrored, working case for the other three. The pin's `entities_in`
+  documents a minimum above its maximum as the same box with the two swapped, so the port also
+  passes an ordered box on purpose.
+- **What a user notices:** a dropped item in a north-, west- or down-facing beam converts, instead
+  of the machine quietly doing nothing to items on three sides.
+- Worth an upstream report: yes (a three-line fix in `invokeConversionLens`); not filed — the
+  orchestrator decides that.
+
+### In-game transcript (`evidence/actuallyadditions-e2e/e2e-launcher.log`, 0.2.7)
+
+```
+package: …/actuallyadditions.hmod, 145399 bytes, sha256 7d35fc805d9e49c05d2cc4e30a1a5f1cc261da0a6d0bf6d3b18b8a5d909bc5e4
+== the beam's item half: dropped items convert, one entity per step (0.2.7) ==
+  the dropped item settled: [{"item":"minecraft:redstone","count":1,"pos":[2.5,100.0,20.5],"distance":4.0}]
+  after the shot: 1 restonia crystal(s), 0 redstone left
+  the converted item's tags: {"chat":["Restonia Crystal has the following entity data: [\"aa_cnv\"]"],"ok":true}
+  after the item shot: Atomic Reconstructor at 0,100,20: 0/300000 CF (comparator 0, facing east, cycle 55/100, lens default, sight nothing, t=6097)
+  the differential's item (two blocks across the beam): [{"item":"minecraft:redstone","count":1,"pos":[8.5,100.0,22.5],"distance":4.47213595499958}]
+  the differential after its shot: Atomic Reconstructor at 6,100,20: 40/300000 CF (comparator 0, facing east, cycle 57/100, lens default, sight nothing, t=6248)
+  three redstone at 1,040 CF: 1 crystal(s), 2 redstone left
+  the leftover input's tags: {"chat":["Found no elements matching Tags"],"ok":true}
+  a west-facing beam's dropped item: 1 crystal(s), 0 redstone left
+  rotten flesh -> leather at 20,000 CF: 1 leather, 0 rotten flesh left
+  quartz -> prismarine shard at 30,000 CF: 1 shard(s), 0 quartz left
+```
+
+Every assertion can fail and was made to: `SELFTEST=item` flips the first one ("the beam converts no
+dropped item"), which passes only on a machine without the item half —
+`FAIL: SELFTEST item: the beam converted the dropped item (the real assertion); the flipped
+assertion 'it converts none' fails, so the real one can fail` + `EXIT:1`
+(`e2e-launcher-selftest-item.log`). The differential inside the run is the same redstone two blocks
+across the beam (untouched, and the shot spends only its gate), and the west leg is the defect fix's
+own assertion.
+
+### Ladder (0.2.7, slot `W1121-aa`, `CARGO_INCREMENTAL=0`, `BUILD_LOCAL=1`)
+
+| Step | Result |
+|---|---|
+| tests | **50 passed**, 0 failed (20 runtime, 11 reconstructor, 19 glue), `Compiling actuallyadditions v0.2.7` from `cargo clean -p actuallyadditions` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings`, exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check`, exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` — `6 recipe(s), 11 craftable, 0 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys.log` |
+| content carry | re-ran `tools/assemble_content.py` + `tools/stamp_license.py`: the two new `laser/` files are the only bytes that moved (140 files before, 142 after; `sha256sum` diff) |
+| package ×2 | `cargo horizon-mod build`, twice, **lock kept** — **145,399 B** both, `cmp` identical, sha256 `7d35fc80…bc5e4`, **152 entries** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `actuallyadditions 0.2.7 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 145399 bytes, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` → **1/1** (packed lock, tree match, runtime hash, skills gate) |
+| in-game | `tools/e2e.sh` (`--offscreen`, launcher build `native-0a875da-7ac0c4c42e48`) → `PASS` + `EXIT:0` — `e2e-launcher.log` |
+| counterfactual | `SELFTEST=item` → `FAIL: SELFTEST item: …` + `EXIT:1` — `e2e-launcher-selftest-item.log` |
+| counterfactual | `SELFTEST=laser` → `FAIL: SELFTEST laser: …` + `EXIT:1` |
+| counterfactual | `SELFTEST=1` → `FAIL: SELFTEST flipped: the placed machine kept 2540 FE, not 0` + `EXIT:1` |
+| counterfactual | `SELFTEST=ore` → `FAIL: SELFTEST ore: …` + `EXIT:1` |
+| counterfactual | `NEGATIVE=1` → `FAIL: NEGATIVE: the Coal Generator's recipe unlocked …` + `EXIT:1` |
+| control | `GAME=$CONTROL_GAME` (the same Nightly, no package) → `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` → `logs=7 ok=7` |
+
+Artifact: `actuallyadditions.hmod`, **145,399 B**, sha256
+`7d35fc805d9e49c05d2cc4e30a1a5f1cc261da0a6d0bf6d3b18b8a5d909bc5e4`, **152 entries** (0.2.6: 150; the
+two new recipes), `Cargo.lock` **packed** (8,850 B, `57fd9355…f998b`, its own version line moved to
+0.2.7, and the copy in the archive equals the tree's). `src/runtime.rs` gained the three item-half
+rules and `src/support.rs` the conversion; `src/lib.rs` is unchanged.
+
+### Coverage (slice 6)
+
+| Family | State |
+|---|---|
+| the beam's item half (a dropped item in the box converts) | **tested** — one dropped redstone becomes one Restonia Crystal, count conserved, buffer 1,040 → 0 |
+| the marker (`aa_cnv`) | **tested** — the output entity's `Tags` read `["aa_cnv"]`; the leftover of a converted stack has none |
+| one entity per beam step, one stack per entity | **tested** — a stack of three at 1,040 CF converts exactly one (40 CF leaves nothing for a second) and two stay |
+| the box's extent (the differential) | **tested** — the same item two blocks across the beam stays redstone and the shot spends only its gate |
+| all six facings | **tested for `east` and `west`** — a west-facing beam converts its item (upstream's inverted-box defect fixed); `north`/`south`/`up`/`down` are the same code path, unit-tested for the box |
+| `laser/leather` (rotten flesh → leather, 20,000 CF) | **tested** — 21,000 CF converts one and leaves an empty buffer |
+| `laser/prismarine_shard` (quartz → prismarine shard, 30,000 CF) | **tested** — 31,000 CF converts one and leaves an empty buffer |
+| `laser/crystalize_restonia_crystal`, `laser/soul_sand`, `laser/nether_wart` on items | **not asserted** — the same code path as the three above; their block half is the 0.2.6 evidence. A sand item would become a soul-sand *item* (upstream's item branch never places) |
+| everything slice 1–5 shipped | unchanged and re-proved in the same run |
+
+### Deviations and gaps this slice adds
+
+1. **The marker is a scoreboard tag, not NeoForge persistent data.** No entity-persistent-data
+   surface at this pin; the tag is saved with the entity, readable in game, and uses upstream's key.
+2. **A whole-stack conversion rewrites the entity in place** (upstream discards it and spawns a new
+   one). Same stack, same position, same pickup delay for the entity that stays; a *partial*
+   conversion leaves the remainder on the entity and spawns the result beside it, exactly upstream's
+   shape. One entity fewer per conversion, and no rollback hazard: an item removal inside a
+   block-entity tick is staged with the snapshot while a spawn is immediate, so discarding an input
+   and spawning two entities could duplicate an item if the tick were rejected.
+3. **A zero-cost `laser/` recipe converts the whole stack**; upstream divides by zero there. No
+   carried recipe has energy 0.
+4. **The lens slot stays inert** and the beam's visual/`levelEvent(2001)` stays unported (as in
+   0.2.6).
+
+### Harness facts measured while getting here
+
+1. **`ctl entities` names an entity's position `pos`**, not `position` (`game/agent.rs`
+   `entities_value`): a `jq` that reads `.position` silently prints `null` and the "settled" line
+   reads like a stale reply. `pos` + `distance` is the pair to print.
+2. **A summoned item stays where it lands and is never picked up with `PickupDelay:32767s`**: the
+   item half only sees entities inside the box, so the leg summons it at `machine + 2.5` (inside the
+   step-2 box) and stands four blocks off.
+3. **`/data get entity … Tags` answers `Found no elements matching Tags`** for an entity with no
+   tags — an absent key, not an empty list, so the "leftover is unmarked" assertion has to accept
+   the error reply and just refuse `aa_cnv` in it.
+4. **The item half needs no hit block**: `invoke` runs at every beam step, so a dropped item in an
+   all-air beam converts at the step whose box first reaches it.
+
+Skills: superpowers/using-superpowers,test-driven-development,verification-before-completion (loaded) + brainstorming (the slice chosen from this file's gap list), writing-plans (`evidence/actuallyadditions/plan-0.2.7.md`), systematic-debugging (the harness facts below); BeautifulRust/rust-best-practices (no rust-port: a clean-room rewrite, not a translation)
+
+**Changelog (0.2.7):**
+
+> **0.2.7 — the beam converts dropped items too.** `MethodHandler.invokeConversionLens` has two
+> halves, and 0.2.6 shipped the block one: after converting the 3×3 plane around the block it hits,
+> the beam converts the **dropped items** in the box from the machine to that block
+> (`new AABB(tile, hit + 1).inflate(0.02).expandTowards(facing)`), as many of a stack as the buffer
+> pays for (`min(energy / recipe energy, count)`), one entity per beam step, marking each result
+> `aa_cnv` so it is never converted twice — and that is how the jar's two item-only `laser/` recipes
+> work: rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, both
+> now carried. Upstream's box is inverted whenever the beam points north, west or down (an `AABB`
+> is not ordered), so those three facings converted no item at all; the port builds the ordered box
+> and converts on all six. The marker is a vanilla scoreboard tag (`aa_cnv`) because the pin has no
+> entity persistent data. 152 entries, 145,399 B, sha256 `7d35fc80…bc5e4`.
+
+## Next slice (0.2.8)
+
+**Family:** **pulse mode + the wrench** — the last piece of the reconstructor's own interaction
+surface that the artefact defines and the port does not ship: `TileEntityAtomicReconstructor`'s
+`isPulseMode` / `tryToggleRedstone` (a click with a wrench toggles between "redstone off" and
+"one shot per pulse"), which is the mod's `actuallyadditions:reset` component and its wrench item.
+
+- **Gap line** (slice 5, "Deviations and gaps this slice adds", item 2): *"No pulse mode, no wrench,
+  no side configuration. A redstone signal freezes the cycle (as upstream), but the mod's own pulse
+  mode and its `tryToggleRedstone` click are not ported."*
+- **Why it fits `machines`:** a saved-state flag, a click on a block the port already ships and one
+  carried item (the wrench), no renderer and no new kind of hook.
+- **Blocker to check first:** the wrench is `actuallyadditions:wrench` in the jar, and the pulse flag
+  upstream saves in the `pulse_mode` **data component** on the dropped item — decide whether the
+  flag rides the existing state allowlist (as `energy`/`cycle` do) or the component, and grep the
+  pin's `ItemPart`/component surface before promising either.
+- **In-game assertion that can fail:** place a reconstructor, click it with the wrench, and assert
+  `/actuallyadditions info` reports `pulse` (a new field); then a redstone block beside it must make
+  it fire **once** per pulse instead of freezing — count two shots across two pulses, and the
+  differential: the same machine without a pulse keeps freezing.
+- **Out of scope:** the GUI (`blocked(no-single-player-mod-screen)`), lens items, the Empowerer, the
+  Double Crusher, the ore's generation (`blocked(configured-feature-not-registered)`).
