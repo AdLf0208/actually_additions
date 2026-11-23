@@ -27,6 +27,12 @@ The rule this tool enforces:
   with the gap symbol it waits on, and a blocker that has become craftable is an
   error too — the record cannot rot into a lie.
 
+The custom types' files live in their own folders. ``recipe/laser/*.json`` (0.2.6) are
+checked too, including their **result**: a laser recipe whose result id the game does
+not know is a beam that fires into nothing, which no unit test and no package check
+would see. The ``crushing/`` files are the oldest carry and are covered by the in-game
+legs instead (the crusher's own matcher, with ``rice`` the one their blocker records).
+
     python3 ports/actuallyadditions/tools/check_recipe_keys.py
     python3 .../check_recipe_keys.py --resources /path/to/26.3   # offline root
 
@@ -202,13 +208,60 @@ def main() -> int:
                 " (a missing tag drops the recipe at load, an unknown item leaves it"
                 " uncraftable; declare the item/tag or add a blocker)"
             )
+
+    # A custom type's recipes live in their own folder (`recipe/laser/<result>.json`,
+    # `recipe/crushing/<input>.json`). The laser recipes are checked here because the machine
+    # reads them at runtime: an unresolved *ingredient* makes a conversion that never fires,
+    # and a result id the game does not know makes one that fires into nothing — neither is
+    # visible to `cargo horizon-mod check`. The crushing files are the port's oldest carry and
+    # are covered by the in-game legs; `rice` is the one their own blocker records.
+    laser_dir = args.port / "data" / MOD / "recipe" / "laser"
+    lasers = sorted(laser_dir.glob("*.json")) if laser_dir.is_dir() else []
+    extra_known: set[str] = set()
+    for path in lasers:
+        recipe = read_json(path)
+        recipe_id = f"{MOD}:laser/{path.stem}"
+        extra_known.add(recipe_id)
+        unresolved = []
+        energy = recipe.get("energy")
+        if not isinstance(energy, int) or isinstance(energy, bool) or energy < 0:
+            failures.append(f"{recipe_id}: 'energy' must be a non-negative integer, got {energy!r}")
+        for kind, name in ingredients(recipe):
+            if kind == "tag":
+                members = expand_tag(name, tags, set())
+                if not members and not _vanilla_tag(args.resources, name):
+                    unresolved.append(f"#{name}")
+                elif not any(m in vanilla or m in own for m in members):
+                    unresolved.append(f"#{name}")
+            elif name not in vanilla and name not in own:
+                unresolved.append(name)
+        result = recipe.get("result") if isinstance(recipe.get("result"), dict) else {}
+        result_id = result.get("id")
+        if not isinstance(result_id, str):
+            unresolved.append("a result without an id")
+        elif result_id not in vanilla and result_id not in own:
+            unresolved.append(f"result {result_id}")
+        if not unresolved:
+            craftable.add(recipe_id)
+            print(f"ok       {recipe_id}: every ingredient and its result resolve (laser)")
+            continue
+        symbol = blocked.get(recipe_id, {}).get("blocked")
+        if symbol:
+            print(f"blocked  {recipe_id}: {symbol} — {', '.join(unresolved)}")
+        else:
+            failures.append(
+                f"{recipe_id}: unresolved {', '.join(unresolved)}"
+                " (the beam would fire into nothing; declare the item/tag or add a blocker)"
+            )
+
     for recipe_id, record in blocked.items():
         if recipe_id in craftable:
             failures.append(
                 f"{recipe_id}: blocked({record.get('blocked')}) is stale — the recipe resolves now;"
                 " remove the blocker and prove it in game"
             )
-        elif not any(path.stem == recipe_id.split(":", 1)[1] for path in recipes):
+        elif not any(path.stem == recipe_id.split(":", 1)[1].split("/")[-1] for path in recipes) \
+                and recipe_id not in extra_known:
             failures.append(
                 f"{recipe_id}: blocked({record.get('blocked')}) names no recipe in this package"
             )

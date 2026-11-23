@@ -57,6 +57,22 @@ ITEMS = ("basic_coil",)
 # configured/placed features and the biome modifier that attaches them are carried below.
 ORE = "black_quartz_ore"
 GEM = "black_quartz"
+# Slice 5 (0.2.6): the Atomic Reconstructor and the crystal its beam makes. The machine is a
+# full-directional block (`FullyDirectionalBlock.FACING`, six values) whose only state property is
+# `facing`; the result of the redstone conversion is a plain item. The three `laser/` recipes are
+# the ones whose terms this package resolves *for a block*: `#c:dusts/redstone` (a redstone wire's
+# block item is `minecraft:redstone`), `#c:sands` and `minecraft:red_mushroom`. The jar's other
+# laser recipes name items this package does not ship (the other crystals, lenses, relays, ethetic
+# blocks) or turn an item into an item (`leather ← rotten flesh`, `prismarine_shard ← quartz`),
+# which is the beam's item-entity half, not the block half this slice proves.
+RECONSTRUCTOR = "atomic_reconstructor"
+CRYSTAL = "restonia_crystal"
+LASER_RECIPES = ("crystalize_restonia_crystal", "soul_sand", "nether_wart")
+# NeoForge 1.21.x's `Tags.Items.DUSTS_REDSTONE` and `Tags.Items.SANDS` (26.3 ships no `c:`
+# namespace, so the two tags the machine's recipe and its soul-sand conversion key on are
+# declared here).
+REDSTONE_DUST_TAG = ("minecraft:redstone",)
+SANDS_TAG = ("minecraft:red_sand", "minecraft:sand", "minecraft:suspicious_sand")
 # NeoForge's convention item tags the Iron Casing's recipe keys on (`#c:ingots/iron`,
 # `#c:rods/wooden`). 26.3 ships no `c:` namespace, so the port declares the two tags; the
 # members are NeoForge 1.21.x's generated lists (iron has one member, wooden rods the stick).
@@ -84,6 +100,9 @@ TEXTURES = (
     "crusher_front.png",
     "crusher_rotation_animation.png",
     "crusher_rotation_animation.png.mcmeta",
+    "atomic_reconstructor_front.png",
+    "atomic_reconstructor_side.png",
+    "base_texture_arrow.png",
 )
 
 
@@ -247,7 +266,12 @@ def main() -> None:
     write(
         OUT / "data/minecraft/tags/block/mineable/pickaxe.json",
         json.dumps(
-            {"values": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)]}, indent=2
+            {
+                "values": [
+                    f"actuallyadditions:{b}" for b in (*BLOCKS, CASING, ORE, RECONSTRUCTOR)
+                ]
+            },
+            indent=2,
         )
         + "\n",
     )
@@ -390,6 +414,99 @@ def main() -> None:
         + "\n",
     )
 
+    # The Atomic Reconstructor and its crystal (slice 5, 0.2.6).
+    for source in ("blockstates", "items"):
+        copy(
+            CARRY / f"assets/actuallyadditions/{source}/{RECONSTRUCTOR}.json",
+            assets / f"{source}/{RECONSTRUCTOR}.json",
+        )
+    copy(
+        CARRY / f"assets/actuallyadditions/models/block/{RECONSTRUCTOR}.json",
+        assets / f"models/block/{RECONSTRUCTOR}.json",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/models/item/{RECONSTRUCTOR}.json",
+        assets / f"models/item/{RECONSTRUCTOR}.json",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/items/{CRYSTAL}.json",
+        assets / f"items/{CRYSTAL}.json",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/models/item/{CRYSTAL}.json",
+        assets / f"models/item/{CRYSTAL}.json",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/textures/item/{CRYSTAL}.png",
+        assets / f"textures/item/{CRYSTAL}.png",
+    )
+    copy(
+        CARRY / f"data/actuallyadditions/loot_table/blocks/{RECONSTRUCTOR}.json",
+        data / f"loot_table/blocks/{RECONSTRUCTOR}.json",
+    )
+    # Its table names the unregistered `actuallyadditions:energy` and `pulse_mode` components, so
+    # the same strip applies as for the two machines: the state rides
+    # `minecraft:block_entity_data` instead (`support::on_block_drops`).
+    reconstructor_table = data / f"loot_table/blocks/{RECONSTRUCTOR}.json"
+    table = json.loads(reconstructor_table.read_text())
+    for pool in table.get("pools", []):
+        pool.pop("modifier", None)
+    write(reconstructor_table, json.dumps(table, indent=2) + "\n")
+    copy(
+        CARRY / f"data/actuallyadditions/recipe/{RECONSTRUCTOR}.json",
+        data / f"recipe/{RECONSTRUCTOR}.json",
+    )
+    copy(
+        CARRY / f"data/actuallyadditions/advancement/craft_reconstructor.json",
+        data / "advancement/craft_reconstructor.json",
+    )
+    # `ActuallyBlocks.defaultPickProps(10.0F, 80F)`: `Blocks.STONE` copied with that strength, so
+    # stone's sound and a tool requirement. The jar's model is a whole block with a face on one
+    # side, and the blockstate names only `facing` (six values), so the template is the one vanilla
+    # block with exactly that state property; the shapes are a full cube on every facing.
+    write(
+        data / f"horizon/block/{RECONSTRUCTOR}.json",
+        json.dumps(
+            {
+                "template": "minecraft:end_rod",
+                "properties": {
+                    "hardness": 10.0,
+                    "explosion_resistance": 80.0,
+                    "light": 0,
+                    "requires_tool": True,
+                    "sounds": "minecraft:stone",
+                },
+                "shapes": {
+                    "property": "facing",
+                    "values": {
+                        facing: [[0, 0, 0, 1, 1, 1]]
+                        for facing in ("down", "up", "north", "south", "west", "east")
+                    },
+                },
+                "item": True,
+            },
+            indent=2,
+        )
+        + "\n",
+    )
+    write(
+        data / f"horizon/item/{CRYSTAL}.json",
+        json.dumps({"template": "minecraft:stick"}, indent=2) + "\n",
+    )
+    for recipe in LASER_RECIPES:
+        copy(
+            CARRY / f"data/actuallyadditions/recipe/laser/{recipe}.json",
+            data / f"recipe/laser/{recipe}.json",
+        )
+    write(
+        OUT / "data/c/tags/item/dusts/redstone.json",
+        json.dumps({"values": list(REDSTONE_DUST_TAG)}, indent=2) + "\n",
+    )
+    write(
+        OUT / "data/c/tags/item/sands.json",
+        json.dumps({"values": list(SANDS_TAG)}, indent=2) + "\n",
+    )
+
     # Upstream's creative tab is code; one tab for the slice, with the two
     # crafting-chain pieces the machine recipes are made of.
     write(
@@ -398,7 +515,7 @@ def main() -> None:
             {
                 "title": "itemGroup.actuallyadditions.machines",
                 "icon": "actuallyadditions:coal_generator",
-                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)] + [f"actuallyadditions:{GEM}"] + [f"actuallyadditions:{i}" for i in ITEMS],
+                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)] + [f"actuallyadditions:{GEM}"] + [f"actuallyadditions:{i}" for i in ITEMS] + [f"actuallyadditions:{RECONSTRUCTOR}", f"actuallyadditions:{CRYSTAL}"],
             },
             indent=2,
         )

@@ -1,5 +1,38 @@
 # Validation
 
+**0.2.6 (2026-11-23, pin `0a875da`)** — slice 5: the Atomic Reconstructor (a facing block entity, a
+300,000 CF buffer, a lens slot, a 100-tick cycle, a ten-block beam converting the 3×3 plane it hits)
+and the three block-reachable `laser/` recipes it fires, the `restonia_crystal` item, the
+`c:dusts/redstone` and `c:sands` tags and the machine's own recipe — which closes the chain: the
+Crusher's recipe now crafts. `tools/recipe-blockers.json` is empty. The conversion rules as the
+artefact states them (buffer 300,000 / shot gate 1,000 / recipe energy on top / distance 10 / cycle
+100 / plane 3×3) are in `notes.md` → "Slice 5".
+
+| Check | Command | Result |
+|---|---|---|
+| pure rules (red) | `cargo test --offline` before the implementation | `error[E0422]: cannot find struct … Reconstructor` + `E0425: … RECONSTRUCTOR_TICKS`, exit 101 — `evidence/actuallyadditions/sdk-test-red-laser.log` |
+| content rule (red) | `python3 tools/check_recipe_keys.py` with the 0.2.5 blocker still in place | `FAIL actuallyadditions:crusher: blocked(restonia_crystal_source) is stale — the recipe resolves now`, `6 recipe(s), 9 craftable, 1 blocked, 1 failure(s)`, exit 1 — `check-recipe-keys-red-0.2.6.log` |
+| content rule | `python3 tools/check_recipe_keys.py` | `6 recipe(s), 9 craftable, 0 blocked, 0 failure(s)`, exit 0; the three `laser/` files `ok … every ingredient and its result resolve (laser)` — `check-recipe-keys.log` |
+| tests | `cargo test --offline` | **47 passed / 0 failed** (20 runtime, 8 reconstructor, 19 glue), `Compiling actuallyadditions v0.2.6` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| package | `cargo horizon-mod build` twice, **lock kept** | **140,841 B** both, `cmp` identical, sha256 `414c0ab9ad5da8795420261ecd04720d5cc030c76d001832d395d2c34693d52b`, **150 entries with `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.6 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 140,841 bytes, EXIT 0 — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1** (packed lock, tree match, skills gate) |
+| in-game | `tools/e2e.sh` (`--offscreen`) on the launcher build of this package | `PASS` + `EXIT:0` — `actuallyadditions-e2e/e2e-launcher.log` |
+| counterfactual | `SELFTEST=laser` | `FAIL: SELFTEST laser: the beam made a crystal (the real assertion); …` + `EXIT:1` — `e2e-launcher-selftest-laser.log` |
+| counterfactual | `SELFTEST=1` | `FAIL: SELFTEST flipped: the placed machine kept 2520 FE, not 0` + `EXIT:1` — `e2e-launcher-selftest.log` |
+| counterfactual | `SELFTEST=ore` | `FAIL: SELFTEST ore: the ore dropped Black Quartz (the real assertion); …` + `EXIT:1` — `e2e-launcher-selftest-ore.log` |
+| counterfactual | `NEGATIVE=1` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour) …` + `EXIT:1` — `e2e-launcher-negative.log` |
+| control | `GAME=$CONTROL_GAME` (same Nightly, no package) | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `python3 ports/tools/check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=6 ok=6` |
+
+The launcher build the leg used is `native-0a875da-226ec8d9c3ec` (its `native-mods.json` records
+`actuallyadditions 0.2.6`), exported to `~/.cache/horizon-e2e/0a875da/actuallyadditions/`; the leg's
+first line names the delivered sha256. The 0.2.5 block below is superseded.
+
 **0.2.5 (2026-11-23, pin `0a875da`)** — slice 4: the Black Quartz Ore, the gem it drops, its loot
 table and three recipes, the `c:ores`/`c:gems` tags, the `c:ingots/iron` + `c:rods/wooden` tags and
 the Iron Casing's own recipe. The ore's **generation** is `blocked(configured-feature-not-registered)`

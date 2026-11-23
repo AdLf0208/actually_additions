@@ -47,6 +47,19 @@
 #    the gap (a content package's configured features do not reach the feature registry; the
 #    placed feature is merged and skipped, the data-file biome modifier is read) — the day the pin
 #    merges them the phase fails, which is the signal to restore the generation assertion;
+#  - (0.2.6) the Atomic Reconstructor: a placed one faces away from the player who placed it; a
+#    generator beside it charges its 300,000 CF buffer through the energy push; one 1,040 CF shot
+#    (the 1,000 CF `ENERGY_USE` gate plus redstone dust's 40 CF conversion) turns the redstone
+#    wire in its beam into a `restonia_crystal` drop, removes the block and leaves the buffer
+#    empty; the same shot at stone spends its 1,000 CF and converts nothing; 1,039 CF pays the
+#    gate but not the conversion; the beam reaches a block ten away and not one eleven away; a
+#    shot converts every convertible block of the 3x3 plane it hits (two wires both go at
+#    1,120 CF, one goes at 1,040) in upstream's order; a redstone block freezes the cycle and its
+#    removal resumes it; a broken one keeps its buffer on its item; and the jar's other two
+#    block-reachable `laser/` recipes convert and empty the buffer (sands → soul sand at 20,000
+#    CF, red mushroom → a nether wart crop at 150,000 CF; both results are blocks, so the beam
+#    places them, as upstream's `BlockItem` branch does). The Crusher's recipe, uncraftable until the beam
+#    could make a crystal, now crafts (tools/craft_check.py);
 #  - with CONTROL_GAME set, an unmodded game on the same scratch home knows neither id
 #    (`setblock` answers `Unknown block type`), so the ids are the package's.
 #
@@ -54,11 +67,13 @@
 # scenario can fail; SELFTEST=drops flips the payload assertion ("the container's `Items` travel"),
 # which passes only on the defect this version fixes, so it must fail too; SELFTEST=ore flips the
 # ore's drop assertion ("the generated ore drops nothing"), which the carried table makes false, so
-# it must fail. NEGATIVE=1 flips the crafting phase's recipe-book assertion ("the Coal Generator's
-# recipe is not unlocked"), which is the pre-0.2.4 state, so it must fail on this package.
+# it must fail; SELFTEST=laser flips the beam's crystal assertion ("the beam makes nothing"), which
+# the restonia conversion makes false, so it must fail. NEGATIVE=1 flips the crafting phase's
+# recipe-book assertion ("the Coal Generator's recipe is not unlocked"), which is the pre-0.2.4
+# state, so it must fail on this package.
 #
 #   GAME=<launcher-built horizon-client> [CTL=<horizon-ctl>] [CONTROL_GAME=<unmodded game>] \
-#       [SELFTEST=1|drops|ore] [NEGATIVE=1] tools/e2e.sh
+#       [SELFTEST=1|drops|ore|laser] [NEGATIVE=1] tools/e2e.sh
 set -euo pipefail
 export LC_ALL=C
 
@@ -153,12 +168,14 @@ feed() { # feed X Y Z ITEM
 }
 info() { # info X Y Z: this machine's status line, after a fresh reply arrives
     local out line before
-    before=$(ctl messages 20 | jq -r '.chat[]' | grep -E "(Coal Generator|Crusher) at $1,$2,$3:" | head -1)
+    # No earlier reply for this position is not an error: `grep` exits 1 when it finds none, and
+    # `pipefail` would make the assignment fatal.
+    before=$(ctl messages 20 | jq -r '.chat[]' | grep -E "(Coal Generator|Crusher|Atomic Reconstructor) at $1,$2,$3:" | head -1 || true)
     say "actuallyadditions info $1 $2 $3"
     for _ in $(seq 1 25); do
         ctl wait 4 >/dev/null
         out=$(ctl messages 20)
-        line=$(jq -r '.chat[]' <<<"$out" | grep -E "(Coal Generator|Crusher) at $1,$2,$3:|No Actually Additions machine" | head -1)
+        line=$(jq -r '.chat[]' <<<"$out" | grep -E "(Coal Generator|Crusher|Atomic Reconstructor) at $1,$2,$3:|No Actually Additions machine" | head -1)
         if [ -n "$line" ] && [ "$line" != "$before" ]; then
             echo "$line"
             return
@@ -176,11 +193,53 @@ expect_info() { # expect_info X Y Z SUBSTRING
     esac
 }
 
-# The energy in an info line: the number before "/60000".
-energy_of() { sed -nE 's/.*(Coal Generator|Crusher) at [-0-9]+,[-0-9]+,[-0-9]+: ([0-9]+)\/[0-9]+ FE.*/\2/p' <<<"$1"; }
+# The energy in an info line: the number before "/60000" or "/300000".
+energy_of() { sed -nE 's/.*(Coal Generator|Crusher|Atomic Reconstructor) at [-0-9]+,[-0-9]+,[-0-9]+: ([0-9]+)\/[0-9]+ (FE|CF).*/\2/p' <<<"$1"; }
 burning_of() { sed -nE 's/.*burning ([0-9]+)\/([0-9]+).*/\1/p' <<<"$1"; }
 burn_max_of() { sed -nE 's/.*burning [0-9]+\/([0-9]+).*/\1/p' <<<"$1"; }
 progress_of() { sed -nE 's/.*progress ([0-9]+)\/[0-9]+.*/\1/p' <<<"$1"; }
+cycle_of() { sed -nE 's/.*cycle ([0-9]+)\/[0-9]+.*/\1/p' <<<"$1"; }
+facing_of() { sed -nE 's/.*facing ([a-z]+),.*/\1/p' <<<"$1"; }
+sight_of() { sed -nE 's/.*sight (.*), t=[0-9]+.*/\1/p' <<<"$1"; }
+block_state_of() { ctl block "$1" "$2" "$3" | jq -r '.state // .name // .block // empty'; }
+# expect_block X Y Z ID: the state at that position is ID (its properties, if any, follow).
+expect_block() { # expect_block X Y Z ID
+    local got
+    got=$(block_state_of "$1" "$2" "$3")
+    case "$got" in
+        "$4"*) echo "  block($1,$2,$3) = $got" ;;
+        *) fail "expected $4 at $1,$2,$3, got '$got'" ;;
+    esac
+}
+# expect_air X Y Z: nothing stands there any more.
+expect_air() { # expect_air X Y Z
+    local got
+    got=$(block_state_of "$1" "$2" "$3")
+    case "$got" in
+        "minecraft:air"|"minecraft:cave_air"|"") echo "  block($1,$2,$3) = air" ;;
+        *) fail "expected air at $1,$2,$3, got '$got'" ;;
+    esac
+}
+# charge X Y Z AMOUNT: fill the machine's buffer through its energy capability, the way a cable
+# would (`/actuallyadditions charge`, a harness addition this slice adds: a single-player world has
+# no charger). Prints the command's own reply.
+charge() { # charge X Y Z AMOUNT
+    local out line before
+    before=$(ctl messages 20 | jq -r '.chat[]' | grep -E "charged .* at $1,$2,$3:" | head -1 || true)
+    say "actuallyadditions charge $1 $2 $3 $4"
+    for _ in $(seq 1 20); do
+        ctl wait 4 >/dev/null
+        out=$(ctl messages 20)
+        line=$(jq -r '.chat[]' <<<"$out" | grep -E "charged .* at $1,$2,$3:" | head -1)
+        if [ -n "$line" ] && [ "$line" != "$before" ]; then
+            echo "$line"
+            return
+        fi
+    done
+    echo "NO-CHARGE $(jq -c '{chat,action_bar}' <<<"$out")"
+}
+# ground ITEM: how many of ITEM lie as item entities near the player (the beam's drops).
+ground() { ctl entities 12 item | jq --arg i "$1" '[.entities[] | select(.item.item == $i) | (.item.count // 1)] | add // 0'; }
 
 cleanup() {
     ctl quit >/dev/null 2>&1 || true
@@ -194,7 +253,7 @@ cleanup() {
 finish() { local rc=$?; cleanup; echo "EXIT:$rc"; return $rc; }
 trap finish EXIT
 # A command that exits under `set -e` before its own assertion prints nothing otherwise: name it.
-trap 'echo "FAIL: the command at line $LINENO exited $?" >&2' ERR
+trap 'echo "FAIL: the command at line $LINENO exited $?: $BASH_COMMAND" >&2' ERR
 
 launch() {
     rm -f "$SOCK"
@@ -1003,6 +1062,9 @@ ctl command "clear @s" >/dev/null
 ctl command "setblock $SILK_X 100 $ORE_Z actuallyadditions:black_quartz_ore" >/dev/null
 ctl wait 6
 ctl command 'give @s minecraft:iron_pickaxe[minecraft:enchantments={"minecraft:silk_touch":1}]' >/dev/null
+# `ctl give`/`give` lands on the next tick: `select` reads the inventory immediately and answers
+# "no minecraft:iron_pickaxe" without the wait (measured 2026-11-23).
+ctl wait 4
 ctl select minecraft:iron_pickaxe >/dev/null
 ctl tp "$SILK_X.5" 100 "$((ORE_Z + 4))" >/dev/null
 ctl wait 8
@@ -1080,6 +1142,284 @@ ctl command "clear @s" >/dev/null
 ctl command "kill @e[type=item]" >/dev/null
 ctl wait 4
 
+echo "== the Atomic Reconstructor: placement, charge, and the laser conversion (0.2.6) =="
+# Every number below is the artefact's, not a guess: 300,000 CF buffer, a 1,000 CF shot gate, the
+# converting recipe's own energy on top (40 for redstone dust, 20,000 for sands, 150,000 for a red
+# mushroom), a 10-block beam and a 100-tick cycle. A shot that converts nothing still spends the
+# 1,000 CF, which is what the stone / distance-11 / 1,039 phases assert.
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl command "kill @e[type=item]" >/dev/null
+ctl wait 6
+# A: `getNearestLookingDirection().getOpposite()` — stand north of the target, look south, and the
+# machine faces north (away from the player's look).
+PLACE_X=2; PLACE_Z=14
+ctl give actuallyadditions:atomic_reconstructor 2 >/dev/null
+ctl wait 3
+ctl select actuallyadditions:atomic_reconstructor >/dev/null
+ctl wait 3
+ctl tp "$((PLACE_X)).5" 100 "$((PLACE_Z - 2)).5" >/dev/null
+ctl look 0 0 >/dev/null
+ctl wait 4
+ctl place "$PLACE_X" 100 "$PLACE_Z" >/dev/null || fail "the Atomic Reconstructor could not be placed"
+ctl wait 6
+PLACED_STATE=$(block_state_of "$PLACE_X" 100 "$PLACE_Z")
+echo "  placed at $PLACE_X,100,$PLACE_Z from the north looking south: $PLACED_STATE"
+case "$PLACED_STATE" in
+    "actuallyadditions:atomic_reconstructor[facing=north]"*) ;;
+    *) fail "the placed reconstructor does not face away from the player: $PLACED_STATE" ;;
+esac
+line=$(info "$PLACE_X" 100 "$PLACE_Z")
+echo "  $line"
+[ "$(energy_of "$line")" = 0 ] || fail "a fresh reconstructor holds CF: $line"
+[ "$(facing_of "$line")" = north ] || fail "the readout does not name the facing: $line"
+
+# B: a generator beside it charges the buffer (the energy push now reaches the reconstructor).
+GEN_X=0; GEN_Z=16
+ctl command "setblock $GEN_X 100 $GEN_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $((GEN_X - 1)) 100 $GEN_Z actuallyadditions:coal_generator" >/dev/null
+ctl wait 6
+feed $((GEN_X - 1)) 100 "$GEN_Z" minecraft:coal
+CHARGE_LINE=""
+for _ in $(seq 1 20); do
+    CHARGE_LINE=$(info $GEN_X 100 $GEN_Z)
+    [ "$(energy_of "$CHARGE_LINE")" -gt 0 ] && break
+    ctl wait 10
+done
+echo "  generator-charged: $CHARGE_LINE"
+[ "$(energy_of "$CHARGE_LINE")" -gt 0 ] \
+    || fail "the generator beside the reconstructor charged nothing: $CHARGE_LINE"
+ctl command "setblock $((GEN_X - 1)) 100 $GEN_Z minecraft:air" >/dev/null
+ctl wait 4
+
+# C: one shot at an adjacent redstone wire: 1,000 CF gate + 40 CF conversion = 1,040.
+RECON_X=2; RECON_Z=18; DUST_X=$((RECON_X + 1))
+ctl command "setblock $RECON_X 100 $RECON_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $DUST_X 100 $RECON_Z minecraft:redstone_wire" >/dev/null
+ctl wait 6
+expect_block "$DUST_X" 100 "$RECON_Z" minecraft:redstone_wire
+CHARGE_REPLY=$(charge "$RECON_X" 100 "$RECON_Z" 1040)
+echo "  $CHARGE_REPLY"
+line=$(info "$RECON_X" 100 "$RECON_Z")
+echo "  charged: $line"
+[ "$(energy_of "$line")" = 1040 ] || fail "the buffer did not take 1,040 CF: $line"
+case "$(sight_of "$line")" in
+    "minecraft:redstone_wire -> actuallyadditions:restonia_crystal @ 40 CF"*) ;;
+    *) fail "the readout does not sight the crystal conversion: $line" ;;
+esac
+ctl tp "$((RECON_X + 7)).5" 100 "$RECON_Z" >/dev/null
+ctl wait 120
+expect_air "$DUST_X" 100 "$RECON_Z"
+CRYSTALS=$(ground actuallyadditions:restonia_crystal)
+echo "  restonia crystals on the ground: $CRYSTALS"
+if [ "$SELFTEST" = laser ]; then
+    # The counterfactual: the flipped assertion says the beam converts nothing. It passes only on
+    # a broken machine, so this run must fail.
+    [ "$CRYSTALS" = 0 ] || fail "SELFTEST laser: the beam made a crystal (the real assertion); the flipped assertion 'it makes none' fails, so the real one can fail"
+    fail "SELFTEST laser: the flipped assertion passed (no crystal), so it proves nothing"
+fi
+[ "$CRYSTALS" -ge 1 ] || fail "the beam made no restonia crystal ($CRYSTALS); the drop list: $(ctl entities 12 item | jq -c '[.entities[] | .item.item]')"
+line=$(info "$RECON_X" 100 "$RECON_Z")
+echo "  after the shot: $line"
+[ "$(energy_of "$line")" = 0 ] || fail "1,040 CF was not exactly the shot plus one conversion: $line"
+
+# D: the differential — the same shot at stone spends its 1,000 CF and converts nothing.
+STONE_X=6; STONE_Z=18
+ctl command "setblock $STONE_X 100 $STONE_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $((STONE_X + 1)) 100 $STONE_Z minecraft:stone" >/dev/null
+ctl wait 6
+ctl command "kill @e[type=item]" >/dev/null
+charge "$STONE_X" 100 "$STONE_Z" 1040 >/dev/null
+line=$(info "$STONE_X" 100 "$STONE_Z")
+echo "  stone: $line"
+case "$(sight_of "$line")" in
+    "minecraft:stone -> nothing"*) ;;
+    *) fail "the readout does not see stone as inconvertible: $line" ;;
+esac
+ctl tp "$((STONE_X + 7)).5" 100 "$STONE_Z" >/dev/null
+ctl wait 120
+expect_block "$((STONE_X + 1))" 100 "$STONE_Z" minecraft:stone
+line=$(info "$STONE_X" 100 "$STONE_Z")
+echo "  after the shot: $line"
+[ "$(energy_of "$line")" = 40 ] \
+    || fail "the shot at stone did not spend exactly its 1,000 CF gate: $line"
+[ "$(ground actuallyadditions:restonia_crystal)" = 0 ] || fail "the stone shot dropped a crystal"
+
+# E: 1,039 CF pays the 1,000 CF gate but not the 40 CF conversion.
+SHORT_X=10; SHORT_Z=18
+ctl command "setblock $SHORT_X 100 $SHORT_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $((SHORT_X + 1)) 100 $SHORT_Z minecraft:redstone_wire" >/dev/null
+ctl wait 6
+charge "$SHORT_X" 100 "$SHORT_Z" 1039 >/dev/null
+ctl tp "$((SHORT_X + 5)).5" 100 "$SHORT_Z" >/dev/null
+ctl wait 120
+expect_block "$((SHORT_X + 1))" 100 "$SHORT_Z" minecraft:redstone_wire
+line=$(info "$SHORT_X" 100 "$SHORT_Z")
+echo "  1,039 CF after the shot: $line"
+[ "$(energy_of "$line")" = 39 ] || fail "1,039 CF did not leave 39 after the gate: $line"
+
+# F: the beam reaches ten blocks and not eleven (an air path in between).
+FAR_X=0; FAR_Z=22
+ctl command "setblock $FAR_X 100 $FAR_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $((FAR_X + 10)) 100 $FAR_Z minecraft:redstone_wire" >/dev/null
+ctl wait 6
+charge "$FAR_X" 100 "$FAR_Z" 1040 >/dev/null
+ctl tp "$((FAR_X + 14)).5" 100 "$FAR_Z" >/dev/null
+ctl wait 120
+expect_air "$((FAR_X + 10))" 100 "$FAR_Z"
+echo "  a block ten away in the beam converted"
+TOO_FAR_X=0; TOO_FAR_Z=23
+ctl command "setblock $TOO_FAR_X 100 $TOO_FAR_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $((TOO_FAR_X + 11)) 100 $TOO_FAR_Z minecraft:redstone_wire" >/dev/null
+ctl wait 6
+charge "$TOO_FAR_X" 100 "$TOO_FAR_Z" 1040 >/dev/null
+ctl tp "$((TOO_FAR_X + 15)).5" 100 "$TOO_FAR_Z" >/dev/null
+ctl wait 120
+expect_block "$((TOO_FAR_X + 11))" 100 "$TOO_FAR_Z" minecraft:redstone_wire
+line=$(info "$TOO_FAR_X" 100 "$TOO_FAR_Z")
+echo "  eleven away, after the shot: $line"
+[ "$(energy_of "$line")" = 40 ] || fail "the eleven-away shot did not spend its gate: $line"
+
+# G: a shot converts every convertible block of the plane the beam hits, in upstream's order.
+PLANE_X=14; PLANE_Z=14; PLANE_AT=$((PLANE_X + 1))
+ctl command "setblock $PLANE_X 100 $PLANE_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $PLANE_AT 100 $((PLANE_Z - 1)) minecraft:redstone_wire" >/dev/null
+ctl command "setblock $PLANE_AT 100 $((PLANE_Z + 1)) minecraft:redstone_wire" >/dev/null
+ctl wait 6
+ctl command "kill @e[type=item]" >/dev/null
+charge "$PLANE_X" 100 "$PLANE_Z" 1120 >/dev/null
+ctl tp "$((PLANE_X + 6)).5" 100 "$PLANE_Z" >/dev/null
+ctl wait 120
+expect_air "$PLANE_AT" 100 "$((PLANE_Z - 1))"
+expect_air "$PLANE_AT" 100 "$((PLANE_Z + 1))"
+BOTH=$(ground actuallyadditions:restonia_crystal)
+echo "  both plane blocks converted: $BOTH crystal(s)"
+[ "$BOTH" -ge 2 ] || fail "1,120 CF did not convert both plane blocks ($BOTH crystals)"
+# The same plane with only 1,040 CF: the first block in the order converts and the second stays.
+ctl command "kill @e[type=item]" >/dev/null
+ctl command "setblock $PLANE_AT 100 $((PLANE_Z - 1)) minecraft:redstone_wire" >/dev/null
+ctl command "setblock $PLANE_AT 100 $((PLANE_Z + 1)) minecraft:redstone_wire" >/dev/null
+charge "$PLANE_X" 100 "$PLANE_Z" 1040 >/dev/null
+ctl wait 120
+expect_air "$PLANE_AT" 100 "$((PLANE_Z - 1))"
+expect_block "$PLANE_AT" 100 "$((PLANE_Z + 1))" minecraft:redstone_wire
+
+# H: redstone freezes the cycle (upstream's `isRedstonePowered`).
+FREEZE_X=18; FREEZE_Z=14
+ctl command "setblock $FREEZE_X 100 $FREEZE_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl wait 6
+CYCLE_A=$(cycle_of "$(info "$FREEZE_X" 100 "$FREEZE_Z")")
+ctl wait 20
+CYCLE_B=$(cycle_of "$(info "$FREEZE_X" 100 "$FREEZE_Z")")
+echo "  cycle without redstone: $CYCLE_A -> $CYCLE_B"
+[ "$CYCLE_A" != "$CYCLE_B" ] || fail "the cycle did not advance without redstone ($CYCLE_A)"
+ctl command "setblock $FREEZE_X 100 $((FREEZE_Z - 1)) minecraft:redstone_block" >/dev/null
+ctl wait 6
+CYCLE_C=$(cycle_of "$(info "$FREEZE_X" 100 "$FREEZE_Z")")
+ctl wait 20
+CYCLE_D=$(cycle_of "$(info "$FREEZE_X" 100 "$FREEZE_Z")")
+echo "  cycle beside a redstone block: $CYCLE_C -> $CYCLE_D"
+[ "$CYCLE_C" = "$CYCLE_D" ] || fail "a redstone-powered reconstructor kept cycling ($CYCLE_C -> $CYCLE_D)"
+ctl command "setblock $FREEZE_X 100 $((FREEZE_Z - 1)) minecraft:air" >/dev/null
+ctl wait 24
+CYCLE_E=$(cycle_of "$(info "$FREEZE_X" 100 "$FREEZE_Z")")
+echo "  cycle after the redstone was removed: $CYCLE_D -> $CYCLE_E"
+[ "$CYCLE_E" != "$CYCLE_D" ] || fail "the cycle did not resume after the redstone was removed"
+
+# I: a broken reconstructor keeps its buffer on its own item.
+KEEP_X=22; KEEP_Z=14
+ctl command "setblock $KEEP_X 100 $KEEP_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl wait 6
+charge "$KEEP_X" 100 "$KEEP_Z" 5000 >/dev/null
+KEEP_BEFORE=$(info "$KEEP_X" 100 "$KEEP_Z")
+echo "  before the break: $KEEP_BEFORE"
+[ "$(energy_of "$KEEP_BEFORE")" -gt 0 ] || fail "the machine to break holds no CF: $KEEP_BEFORE"
+ctl command "kill @e[type=item]" >/dev/null
+ctl command "gamemode survival @s" >/dev/null
+ctl command "item replace entity @s hotbar.0 with minecraft:iron_pickaxe 1" >/dev/null
+ctl wait 4
+ctl select 1 >/dev/null
+ctl tp "$KEEP_X.5" 100 "$((KEEP_Z - 3)).5" >/dev/null
+ctl wait 6
+KEEP_BREAK=$(ctl break "$KEEP_X" 100 "$KEEP_Z") || fail "the reconstructor did not break"
+echo "  break: $(jq -c '{drops, picked_up, items_left_on_ground}' <<<"$KEEP_BREAK")"
+jq -e '(.drops["actuallyadditions:atomic_reconstructor"] // 0) >= 1' <<<"$KEEP_BREAK" >/dev/null \
+    || fail "the reconstructor did not drop itself: $KEEP_BREAK"
+KEEP_TAG=""
+for _ in $(seq 1 12); do
+    KEEP_TAG=$(ctl command "data get entity @e[type=minecraft:item,nbt={Item:{id:\"actuallyadditions:atomic_reconstructor\"}},limit=1,sort=nearest] Item" 2>&1 || true)
+    case "$KEEP_TAG" in *"following entity data"*) break ;; esac
+    ctl wait 5 >/dev/null
+done
+echo "  the drop's Item tag: $KEEP_TAG"
+grep -qE 'energy: *[1-9]' <<<"$KEEP_TAG" \
+    || fail "the broken reconstructor's payload carries no energy: $KEEP_TAG"
+PAYLOAD_CF=$(sed -nE 's/.*energy: *([0-9]+).*/\1/p' <<<"$KEEP_TAG")
+echo "  payload: $PAYLOAD_CF CF"
+[ "$PAYLOAD_CF" -le 5000 ] || fail "the payload's CF is more than the buffer had: $KEEP_TAG"
+ctl command "gamemode creative @s" >/dev/null
+ctl wait 4
+ctl command "clear @s" >/dev/null
+ctl tp "$KEEP_X.5" 100 "$(centre "$KEEP_Z")" >/dev/null
+ctl wait 40
+for _ in 1 2 3; do
+    HELD=$(ctl inventory | jq -r '.held.item // empty')
+    [ "$HELD" = "actuallyadditions:atomic_reconstructor" ] && break
+    DROP=$(ctl entities 12 item | jq -r '[.entities[] | select(.item.item == "actuallyadditions:atomic_reconstructor") | .position] | first // empty | @csv')
+    [ -n "$DROP" ] || break
+    IFS=, read -r dx dy dz <<<"$DROP"
+    ctl tp "$dx" "$dy" "$dz" >/dev/null
+    ctl wait 20
+done
+ctl tp "$((KEEP_X - 3)).5" 100 "$KEEP_Z.5" >/dev/null
+ctl wait 4
+ctl place "$((KEEP_X - 2))" 100 "$KEEP_Z" --item actuallyadditions:atomic_reconstructor >/dev/null \
+    || fail "the reconstructor could not be placed again"
+ctl wait 8
+KEEP_AFTER=$(info "$((KEEP_X - 2))" 100 "$KEEP_Z")
+echo "  placed again: $KEEP_AFTER"
+[ "$(energy_of "$KEEP_AFTER")" -gt 0 ] \
+    || fail "the reconstructor lost its CF across a break: $KEEP_AFTER"
+
+# J: the two vanilla conversions the jar's `laser/` recipes declare for blocks. Both results are
+# `BlockItem`s, so upstream's block branch *places* them (`MethodHandler.invokeConversionLens`):
+# the sand becomes soul sand in place, and the mushroom becomes a nether wart crop — which needs
+# soul sand under it, so the cell is prepared that way (a crop on stone would pop and drop, which
+# is vanilla's outcome but proves less).
+SAND_X=2; SAND_Z=10
+ctl command "setblock $SAND_X 100 $SAND_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $((SAND_X + 1)) 100 $SAND_Z minecraft:sand" >/dev/null
+ctl wait 6
+ctl command "kill @e[type=item]" >/dev/null
+charge "$SAND_X" 100 "$SAND_Z" 21000 >/dev/null
+line=$(info "$SAND_X" 100 "$SAND_Z")
+echo "  sand: $(sight_of "$line")"
+ctl tp "$((SAND_X + 7)).5" 100 "$SAND_Z" >/dev/null
+ctl wait 120
+expect_block "$((SAND_X + 1))" 100 "$SAND_Z" minecraft:soul_sand
+line=$(info "$SAND_X" 100 "$SAND_Z")
+[ "$(energy_of "$line")" = 0 ] || fail "the 20,000 CF conversion did not leave an empty buffer: $line"
+WART_X=6; WART_Z=10
+ctl command "setblock $WART_X 100 $WART_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $((WART_X + 1)) 99 $WART_Z minecraft:soul_sand" >/dev/null
+ctl command "setblock $((WART_X + 1)) 101 $WART_Z minecraft:stone" >/dev/null
+ctl command "setblock $((WART_X + 1)) 100 $WART_Z minecraft:red_mushroom" >/dev/null
+ctl wait 6
+expect_block "$((WART_X + 1))" 100 "$WART_Z" minecraft:red_mushroom
+ctl command "kill @e[type=item]" >/dev/null
+charge "$WART_X" 100 "$WART_Z" 151000 >/dev/null
+line=$(info "$WART_X" 100 "$WART_Z")
+echo "  red mushroom: $(sight_of "$line")"
+ctl tp "$((WART_X + 7)).5" 100 "$WART_Z" >/dev/null
+ctl wait 120
+expect_block "$((WART_X + 1))" 100 "$WART_Z" minecraft:nether_wart
+line=$(info "$WART_X" 100 "$WART_Z")
+[ "$(energy_of "$line")" = 0 ] || fail "the 150,000 CF conversion did not leave an empty buffer: $line"
+ctl command "clear @s" >/dev/null
+ctl command "kill @e[type=item]" >/dev/null
+ctl command "gamemode creative @s" >/dev/null
+ctl wait 4
+
 control
 
-echo "PASS: a fuelled generator made FE, the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty, and the Crusher's recipe is still uncraftable because restonia_crystal is not in this slice), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, and the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails)"
+echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed"

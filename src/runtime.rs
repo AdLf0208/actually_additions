@@ -390,6 +390,519 @@ pub fn restored_crusher(energy: i32, progress: i32) -> Crusher {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The Atomic Reconstructor and its laser conversion (upstream
+// `TileEntityAtomicReconstructor`, `MethodHandler.invokeReconstructor` /
+// `invokeConversionLens`, `LensConversion`, `LaserRecipe`)
+// ---------------------------------------------------------------------------
+
+/// Upstream `CommonConfig.Machines.RECONSTRUCTOR_POWER`'s default: the CF buffer.
+pub const RECONSTRUCTOR_CAPACITY: i32 = 300_000;
+/// `Mth.ceil(power * 0.016666F)` — the most one insert call moves.
+pub const RECONSTRUCTOR_MAX_INSERT: i32 = 5_000;
+/// Upstream `TileEntityAtomicReconstructor.ENERGY_USE`: one shot's gate, paid before the
+/// beam walks and on top of the converting recipe's own energy.
+pub const RECONSTRUCTOR_ENERGY_USE: i32 = 1_000;
+/// The `currentTime` reset: a shot is attempted about once every hundred ticks.
+pub const RECONSTRUCTOR_TICKS: u32 = 100;
+/// `LensConversion.getDistance()`: the default conversion lens reaches ten blocks.
+pub const RECONSTRUCTOR_LENS_DISTANCE: i32 = 10;
+/// `invokeConversionLens`'s `range`: a shot converts the 3x3 plane it hits.
+pub const RECONSTRUCTOR_CONVERSION_RANGE: i32 = 1;
+/// Upstream's comparator: `clamp(energy / 20000, 0, 15)`, not the buffer's fifteenths.
+pub const RECONSTRUCTOR_COMPARATOR_STEP: i32 = 20_000;
+
+/// One of the six block directions, in upstream's `Direction` vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Facing {
+    Down,
+    Up,
+    North,
+    South,
+    West,
+    East,
+}
+
+impl Facing {
+    /// The state property's value (`facing=east`).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Facing::Down => "down",
+            Facing::Up => "up",
+            Facing::North => "north",
+            Facing::South => "south",
+            Facing::West => "west",
+            Facing::East => "east",
+        }
+    }
+
+    /// The facing a state property names, `None` for anything else.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "down" => Some(Facing::Down),
+            "up" => Some(Facing::Up),
+            "north" => Some(Facing::North),
+            "south" => Some(Facing::South),
+            "west" => Some(Facing::West),
+            "east" => Some(Facing::East),
+            _ => None,
+        }
+    }
+
+    /// `Direction.getOpposite`.
+    #[must_use]
+    pub fn opposite(self) -> Self {
+        match self {
+            Facing::Down => Facing::Up,
+            Facing::Up => Facing::Down,
+            Facing::North => Facing::South,
+            Facing::South => Facing::North,
+            Facing::West => Facing::East,
+            Facing::East => Facing::West,
+        }
+    }
+
+    /// `BlockPos.relative`'s offset: north is -z, east +x, up +y.
+    #[must_use]
+    pub fn offset(self) -> [i32; 3] {
+        match self {
+            Facing::Down => [0, -1, 0],
+            Facing::Up => [0, 1, 0],
+            Facing::North => [0, 0, -1],
+            Facing::South => [0, 0, 1],
+            Facing::West => [-1, 0, 0],
+            Facing::East => [1, 0, 0],
+        }
+    }
+
+    /// The axis it lies on: 0 = x, 1 = y, 2 = z.
+    #[must_use]
+    pub fn axis(self) -> usize {
+        match self {
+            Facing::Down | Facing::Up => 1,
+            Facing::North | Facing::South => 2,
+            Facing::West | Facing::East => 0,
+        }
+    }
+}
+
+/// The blocks one shot converts around the block the beam hit: a 3x3 plane across the beam
+/// (`invokeConversionLens`'s `range 1`, zero on the facing axis), in upstream's
+/// `reachX` → `reachZ` → `reachY` order, the hit block at its centre.
+#[must_use]
+pub fn conversion_plane(hit: [i32; 3], facing: Facing) -> Vec<[i32; 3]> {
+    let reach = |axis: usize| {
+        if axis == facing.axis() {
+            0
+        } else {
+            RECONSTRUCTOR_CONVERSION_RANGE
+        }
+    };
+    let (range_x, range_y, range_z) = (reach(0), reach(1), reach(2));
+    let mut plane = Vec::with_capacity(9);
+    for dx in -range_x..=range_x {
+        for dz in -range_z..=range_z {
+            for dy in -range_y..=range_y {
+                plane.push([hit[0] + dx, hit[1] + dy, hit[2] + dz]);
+            }
+        }
+    }
+    plane
+}
+
+/// `BlockAtomicReconstructor.getAnalogOutputSignal`: `clamp(energy / 20000, 0, 15)`.
+#[must_use]
+pub fn reconstructor_comparator(energy: i32) -> i32 {
+    (energy.max(0) / RECONSTRUCTOR_COMPARATOR_STEP).clamp(0, 15)
+}
+
+/// The Atomic Reconstructor's saved state: its CF buffer and the position in its cycle
+/// (`TileEntityAtomicReconstructor`'s `Energy` and `CurrentTime`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reconstructor {
+    pub energy: i32,
+    pub cycle: u32,
+}
+
+impl Reconstructor {
+    /// The empty machine.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// One server tick. A redstone-powered machine does not advance and does not shoot.
+    /// Returns true on the tick the cycle reaches zero, when upstream calls
+    /// `invokeReconstructor`.
+    pub fn tick(&mut self, powered: bool) -> bool {
+        if powered {
+            return false;
+        }
+        if self.cycle > 0 {
+            self.cycle -= 1;
+            return self.cycle == 0;
+        }
+        self.cycle = RECONSTRUCTOR_TICKS;
+        false
+    }
+
+    /// The shot's gate: under 1000 CF nothing goes out; otherwise the gate is paid and the
+    /// remaining buffer is the beam's budget (upstream extracts before walking it).
+    pub fn fire(&mut self) -> Option<i32> {
+        if self.energy < RECONSTRUCTOR_ENERGY_USE {
+            return None;
+        }
+        self.energy -= RECONSTRUCTOR_ENERGY_USE;
+        Some(self.energy)
+    }
+
+    /// Whether the buffer still covers one conversion's own energy.
+    #[must_use]
+    pub fn can_afford(&self, energy: i32) -> bool {
+        self.energy >= energy
+    }
+
+    /// Pay one conversion's energy (`tile.extractEnergy(recipe.getEnergy())`).
+    pub fn spend(&mut self, energy: i32) {
+        self.energy = (self.energy - energy.max(0)).max(0);
+    }
+}
+
+/// What a placed reconstructor comes back with: its buffer clamped and its cycle inside the
+/// machine's own range (a stale item can name any int).
+#[must_use]
+pub fn restored_reconstructor(energy: i32, cycle: i32) -> Reconstructor {
+    Reconstructor {
+        energy: clamp_energy(energy, RECONSTRUCTOR_CAPACITY),
+        cycle: (cycle.max(0) as u32).min(RECONSTRUCTOR_TICKS),
+    }
+}
+
+/// `Block.getStateForPlacement` for upstream's `FullyDirectionalBlock`:
+/// `getNearestLookingDirection().getOpposite()`, i.e. the machine faces away from the player.
+#[must_use]
+pub fn facing_for_placement(yaw: f32, pitch: f32) -> Facing {
+    nearest_looking_direction(yaw, pitch).opposite()
+}
+
+/// `Direction.orderedByNearest(yaw, pitch)[0]`: the direction the view points at most.
+/// The branch structure is the engine's own (`horizon-world/src/level/place.rs`), so a
+/// tie resolves the same way vanilla resolves it.
+fn nearest_looking_direction(yaw: f32, pitch: f32) -> Facing {
+    let pitch_rad = f64::from(pitch) * (std::f64::consts::PI / 180.0);
+    let yaw_rad = -f64::from(yaw) * (std::f64::consts::PI / 180.0);
+    let (pitch_sin, pitch_cos) = (pitch_rad.sin(), pitch_rad.cos());
+    let (yaw_sin, yaw_cos) = (yaw_rad.sin(), yaw_rad.cos());
+    let x_pos = yaw_sin > 0.0;
+    let y_pos = pitch_sin < 0.0;
+    let z_pos = yaw_cos > 0.0;
+    let x_yaw = if x_pos { yaw_sin } else { -yaw_sin };
+    let y_mag = if y_pos { -pitch_sin } else { pitch_sin };
+    let z_yaw = if z_pos { yaw_cos } else { -yaw_cos };
+    let x_mag = x_yaw * pitch_cos;
+    let z_mag = z_yaw * pitch_cos;
+    let ax = if x_pos { Facing::East } else { Facing::West };
+    let ay = if y_pos { Facing::Up } else { Facing::Down };
+    let az = if z_pos { Facing::South } else { Facing::North };
+    // The engine's own branch structure, reduced to its first element: the two pairs of
+    // branches that answered the same direction are one branch here.
+    if x_yaw > z_yaw {
+        if y_mag > x_mag { ay } else { ax }
+    } else if y_mag > z_mag {
+        ay
+    } else {
+        az
+    }
+}
+
+/// Why a laser recipe's JSON was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaserError {
+    MissingIngredient,
+    MissingResult,
+    MissingEnergy,
+    BadEnergy,
+}
+
+impl std::fmt::Display for LaserError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            LaserError::MissingIngredient => "missing ingredient",
+            LaserError::MissingResult => "missing result",
+            LaserError::MissingEnergy => "missing energy",
+            LaserError::BadEnergy => "an energy that is not a non-negative integer",
+        };
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for LaserError {}
+
+/// One `actuallyadditions:laser` recipe (upstream `LaserRecipe`): an ingredient, the result
+/// it becomes, and the CF one conversion costs on top of the shot's gate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LaserRecipe {
+    pub id: String,
+    pub energy: i32,
+    /// The ingredient as the pin's `recipe_ingredient` names it (`"id"` / `"#tag"` / a list).
+    pub ingredient: Value,
+    /// The file's own `result` object, for the pin's `recipe_result`.
+    pub result: Value,
+}
+
+impl LaserRecipe {
+    /// Parse a recipe file. The JSON is the pin's custom-recipe JSON, unchanged from
+    /// 1.21.1 (the custom table keeps it as written).
+    pub fn parse(id: &str, json: &str) -> Result<Self, LaserError> {
+        let value: Value = serde_json::from_str(json).map_err(|_| LaserError::MissingIngredient)?;
+        let ingredient = value
+            .get("ingredient")
+            .ok_or(LaserError::MissingIngredient)?;
+        if !matches!(
+            ingredient,
+            Value::Object(_) | Value::Array(_) | Value::String(_)
+        ) {
+            return Err(LaserError::MissingIngredient);
+        }
+        let result = value.get("result").ok_or(LaserError::MissingResult)?;
+        if result.get("id").and_then(Value::as_str).is_none() {
+            return Err(LaserError::MissingResult);
+        }
+        let energy = value
+            .get("energy")
+            .ok_or(LaserError::MissingEnergy)?
+            .as_i64()
+            .ok_or(LaserError::BadEnergy)?;
+        if !(0..=i64::from(i32::MAX)).contains(&energy) {
+            return Err(LaserError::BadEnergy);
+        }
+        Ok(Self {
+            id: id.to_owned(),
+            energy: energy as i32,
+            ingredient: ingredient_json(ingredient),
+            result: result.clone(),
+        })
+    }
+
+    /// The item id the conversion produces.
+    #[must_use]
+    pub fn result_id(&self) -> Option<&str> {
+        self.result.get("id").and_then(Value::as_str)
+    }
+
+    /// How many items the conversion produces (1 unless the file says otherwise).
+    #[must_use]
+    pub fn result_count(&self) -> i32 {
+        self.result
+            .get("count")
+            .and_then(Value::as_i64)
+            .unwrap_or(1)
+            .clamp(1, 99) as i32
+    }
+}
+
+#[cfg(test)]
+mod reconstructor_tests {
+    use super::*;
+
+    #[test]
+    fn the_shot_costs_a_thousand_and_the_recipe_its_own() {
+        let mut reconstructor = Reconstructor {
+            energy: 1_040,
+            cycle: 1,
+        };
+        assert!(reconstructor.tick(false), "the cycle reaches 0 and fires");
+        assert_eq!(
+            reconstructor.fire(),
+            Some(40),
+            "the 1000 CF gate is paid first"
+        );
+        assert!(
+            reconstructor.can_afford(40),
+            "redstone dust's recipe costs 40 CF on top"
+        );
+        reconstructor.spend(40);
+        assert_eq!(reconstructor.energy, 0);
+        assert!(
+            !reconstructor.can_afford(40),
+            "an empty buffer converts nothing"
+        );
+
+        let mut short = Reconstructor {
+            energy: 1_039,
+            cycle: 1,
+        };
+        assert!(short.tick(false));
+        assert_eq!(short.fire(), Some(39));
+        assert!(
+            !short.can_afford(40),
+            "39 CF left after the shot is not enough for the 40 CF conversion"
+        );
+
+        let mut empty = Reconstructor {
+            energy: 0,
+            cycle: 1,
+        };
+        assert!(empty.tick(false));
+        assert_eq!(empty.fire(), None, "under 1000 CF the shot does not go out");
+    }
+
+    #[test]
+    fn the_cycle_is_about_a_hundred_ticks() {
+        let mut reconstructor = Reconstructor::new();
+        assert!(!reconstructor.tick(false));
+        assert_eq!(reconstructor.cycle, RECONSTRUCTOR_TICKS);
+        for _ in 1..RECONSTRUCTOR_TICKS {
+            assert!(!reconstructor.tick(false));
+        }
+        assert_eq!(reconstructor.cycle, 1);
+        assert!(reconstructor.tick(false), "the hundredth tick fires");
+        assert_eq!(reconstructor.cycle, 0);
+    }
+
+    #[test]
+    fn redstone_freezes_the_cycle() {
+        let mut reconstructor = Reconstructor {
+            energy: 5_000,
+            cycle: 50,
+        };
+        for _ in 0..20 {
+            assert!(!reconstructor.tick(true), "a powered machine does not fire");
+        }
+        assert_eq!(reconstructor.cycle, 50, "the cycle does not advance");
+        assert_eq!(reconstructor.energy, 5_000);
+    }
+
+    #[test]
+    fn the_comparator_steps_every_twenty_thousand() {
+        assert_eq!(reconstructor_comparator(0), 0);
+        assert_eq!(reconstructor_comparator(19_999), 0);
+        assert_eq!(reconstructor_comparator(20_000), 1);
+        assert_eq!(reconstructor_comparator(-5), 0);
+        assert_eq!(reconstructor_comparator(RECONSTRUCTOR_CAPACITY), 15);
+        assert_eq!(reconstructor_comparator(900_000), 15);
+    }
+
+    #[test]
+    fn the_plane_is_three_by_three_across_the_beam() {
+        let hit = [10, 100, 0];
+        let east = conversion_plane(hit, Facing::East);
+        assert_eq!(east.len(), 9);
+        assert!(
+            east.iter().all(|at| at[0] == 10),
+            "a horizontal beam converts the plane one block deep along its axis"
+        );
+        assert_eq!(
+            east.iter().map(|at| (at[2], at[1])).collect::<Vec<_>>(),
+            vec![
+                (-1, 99),
+                (-1, 100),
+                (-1, 101),
+                (0, 99),
+                (0, 100),
+                (0, 101),
+                (1, 99),
+                (1, 100),
+                (1, 101)
+            ],
+            "upstream's reachZ then reachY order, the centre block in the middle"
+        );
+        let up = conversion_plane(hit, Facing::Up);
+        assert_eq!(up.len(), 9);
+        assert!(
+            up.iter().all(|at| at[1] == 100),
+            "a vertical beam converts the horizontal plane"
+        );
+        let north = conversion_plane(hit, Facing::North);
+        assert!(
+            north.iter().all(|at| at[2] == 0),
+            "a north beam converts the plane across x and y"
+        );
+    }
+
+    #[test]
+    fn a_placed_reconstructor_faces_away_from_the_player() {
+        // `getNearestLookingDirection().getOpposite()`: yaw 0 is south, 90 west.
+        assert_eq!(facing_for_placement(0.0, 0.0), Facing::North);
+        assert_eq!(facing_for_placement(180.0, 0.0), Facing::South);
+        assert_eq!(facing_for_placement(90.0, 0.0), Facing::East);
+        assert_eq!(facing_for_placement(-90.0, 0.0), Facing::West);
+        assert_eq!(facing_for_placement(0.0, -90.0), Facing::Down);
+        assert_eq!(facing_for_placement(0.0, 90.0), Facing::Up);
+        assert_eq!(
+            facing_for_placement(0.0, -45.0),
+            Facing::North,
+            "a 45 degree look is still the horizontal axis first"
+        );
+    }
+
+    #[test]
+    fn a_laser_recipe_is_read_from_the_jars_json() {
+        let recipe = LaserRecipe::parse(
+            "actuallyadditions:laser/crystalize_restonia_crystal",
+            r#"{"type": "actuallyadditions:laser", "energy": 40,
+                "ingredient": {"tag": "c:dusts/redstone"},
+                "result": {"id": "actuallyadditions:restonia_crystal"}}"#,
+        )
+        .expect("the carried recipe parses");
+        assert_eq!(recipe.energy, 40);
+        assert_eq!(
+            recipe.ingredient,
+            Value::String("#c:dusts/redstone".into()),
+            "the ingredient is the pin's own form, as the crusher's recipes use"
+        );
+        assert_eq!(
+            recipe.result_id(),
+            Some("actuallyadditions:restonia_crystal")
+        );
+        assert_eq!(recipe.result_count(), 1);
+
+        assert_eq!(
+            LaserRecipe::parse("x:y", r#"{"energy": 40, "ingredient": {"item": "a:b"}}"#),
+            Err(LaserError::MissingResult)
+        );
+        assert_eq!(
+            LaserRecipe::parse(
+                "x:y",
+                r#"{"ingredient": {"item": "a:b"}, "result": {"id": "a:c"}}"#
+            ),
+            Err(LaserError::MissingEnergy)
+        );
+        assert_eq!(
+            LaserRecipe::parse(
+                "x:y",
+                r#"{"energy": -1, "ingredient": {"item": "a:b"}, "result": {"id": "a:c"}}"#
+            ),
+            Err(LaserError::BadEnergy)
+        );
+        assert_eq!(
+            LaserRecipe::parse("x:y", r#"{"energy": 1, "result": {"id": "a:c"}}"#),
+            Err(LaserError::MissingIngredient)
+        );
+    }
+
+    #[test]
+    fn a_restored_reconstructor_is_clamped_into_its_buffer_and_cycle() {
+        assert_eq!(
+            restored_reconstructor(5_000, 40),
+            Reconstructor {
+                energy: 5_000,
+                cycle: 40
+            }
+        );
+        assert_eq!(
+            restored_reconstructor(400_000, 900),
+            Reconstructor {
+                energy: RECONSTRUCTOR_CAPACITY,
+                cycle: RECONSTRUCTOR_TICKS
+            }
+        );
+        assert_eq!(restored_reconstructor(-1, -7), Reconstructor::new());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

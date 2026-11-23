@@ -13,25 +13,32 @@ use std::sync::{Mutex, OnceLock};
 use mod_api::{
     self, BiomeModifier, BiomeModifierOperation, BlockClick, BlockDropsEvent, BlockEntityEvent,
     BlockEntityPart, BlockEntityTickEvent, BlockEntityTickReply, BlockEntityTicksEvent, BlockPart,
-    Command, CommandArgumentValue, Compound, ENERGY, Flow, Host, HostTransaction, Identifier,
-    Ingredient, InteractionResult, ItemKey, ItemPart, ItemPlace, ItemResource, ItemStack,
-    LevelHost, LevelRef, LevelSide, ModContainer, ModEnergyBuffer, OnBlockPlacedByEvent,
-    RandomSource, Registrar, RegistrationContext, RunModCommandEvent, ServerHost, Tag, Text,
-    move_energy,
+    BlockState, BlockUpdateFlags, Command, CommandArgumentValue, Compound, ENERGY, Flow, Host,
+    HostTransaction, Identifier, Ingredient, InteractionResult, ItemKey, ItemPart, ItemPlace,
+    ItemResource, ItemStack, LevelHost, LevelRef, LevelSide, ModContainer, ModEnergyBuffer,
+    OnBlockPlacedByEvent, RandomSource, Registrar, RegistrationContext, RunModCommandEvent,
+    ServerHost, StateForPlacementEvent, Tag, Text, move_energy,
 };
 
 use crate::runtime::{
     CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, CrushResult, Crusher, CrushingRecipe,
-    GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, Step, bonus_for, can_crush, clamp_energy,
-    comparator_strength, ingredient_json, is_fuel, restored_crusher, restored_generator,
+    GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, LaserRecipe, RECONSTRUCTOR_CAPACITY,
+    RECONSTRUCTOR_LENS_DISTANCE, RECONSTRUCTOR_MAX_INSERT, RECONSTRUCTOR_TICKS, Reconstructor,
+    Step, bonus_for, can_crush, clamp_energy, comparator_strength, conversion_plane,
+    facing_for_placement, ingredient_json, is_fuel, reconstructor_comparator, restored_crusher,
+    restored_generator, restored_reconstructor,
 };
 
 /// The generator block; its block entity type carries the same path.
 pub(crate) const GENERATOR: &str = "actuallyadditions:coal_generator";
 /// The crusher block; its block entity type carries the same path.
 pub(crate) const CRUSHER: &str = "actuallyadditions:crusher";
+/// The atomic reconstructor block; its block entity type carries the same path.
+pub(crate) const RECONSTRUCTOR: &str = "actuallyadditions:atomic_reconstructor";
 /// The custom recipe type the crusher reads (upstream `ActuallyAdditionsAPI.RECIPE_CRUSHING`).
 const CRUSHING: &str = "actuallyadditions:crushing";
+/// The custom recipe type the reconstructor's beam reads (upstream `LaserRecipe.NAME`).
+const LASER: &str = "actuallyadditions:laser";
 /// Rebuild the parsed recipe cache this often (ticks): a `/reload` lands within two seconds and
 /// the pure parser cost is paid once, as the retired bundle did.
 const RECIPE_CACHE_TICKS: u64 = 40;
@@ -39,6 +46,8 @@ const RECIPE_CACHE_TICKS: u64 = 40;
 const GENERATOR_SLOTS: usize = 1;
 /// The crusher's slots: input, guaranteed output, chance output.
 const CRUSHER_SLOTS: usize = 3;
+/// The reconstructor's one slot: its lens (`TileEntityAtomicReconstructor`, size 1).
+const RECONSTRUCTOR_SLOTS: usize = 1;
 /// The slot a click fills: fuel for the generator, the input for the crusher.
 const INPUT_SLOT: usize = 0;
 /// The crusher's guaranteed-output slot.
@@ -54,8 +63,8 @@ const NO_MACHINE: &str = "No Actually Additions machine there.";
 // What the mod declares for its two blocks
 // ---------------------------------------------------------------------------
 
-/// Declare both machines: a block entity type each, its Part (tick and click), the container and
-/// the energy buffer (upstream's `RegisterCapabilitiesEvent`).
+/// Declare the three machines: a block entity type each, its Part (tick and click), the container
+/// and the energy buffer (upstream's `RegisterCapabilitiesEvent`).
 pub(crate) fn declare(r: &mut dyn Registrar, context: &RegistrationContext) {
     // The carried `data/actuallyadditions/recipe/crushing/*.json` declare this type; without
     // a serializer the game refuses every one of them at load ("unregistered recipe
@@ -63,6 +72,10 @@ pub(crate) fn declare(r: &mut dyn Registrar, context: &RegistrationContext) {
     // crusher's own matcher), so the serializer only has to accept and keep the object.
     r.register_recipe_type(CRUSHING);
     r.register_raw_recipe_serializer(CRUSHING, CRUSHING);
+    // The Atomic Reconstructor's `laser/*` recipes are the same shape of custom type, read by
+    // the beam's own matcher.
+    r.register_recipe_type(LASER);
+    r.register_raw_recipe_serializer(LASER, LASER);
     // The type is declared first, then every per-block capability, then the Part: that is the
     // order the pin's own registrar expects (the block's declaration is what a container or a
     // buffer hangs off).
@@ -77,21 +90,31 @@ pub(crate) fn declare(r: &mut dyn Registrar, context: &RegistrationContext) {
         .block_entity_type("crusher_block_entity")
         .blocks(&["crusher"])
         .build();
+    let reconstructor_kind = r
+        .block_entity_type("atomic_reconstructor_block_entity")
+        .blocks(&["atomic_reconstructor"])
+        .build();
     let generator = r.block_key(GENERATOR);
     let crusher = r.block_key(CRUSHER);
+    let reconstructor = r.block_key(RECONSTRUCTOR);
     r.block_container(&generator, generator_container());
     r.block_container(&crusher, crusher_container());
+    r.block_container(&reconstructor, reconstructor_container());
     r.block_energy(&generator, generator_battery());
     r.block_energy(&crusher, crusher_battery());
+    r.block_energy(&reconstructor, reconstructor_battery());
     // A broken machine's item carries its saved state (`block_drops`) and clamps it back when
     // placed again (this Part on the block item).
     let generator_item = r.item_key(GENERATOR);
     let crusher_item = r.item_key(CRUSHER);
+    let reconstructor_item = r.item_key(RECONSTRUCTOR);
     r.item_part(generator_item, MachineItemPart);
     r.item_part(crusher_item, MachineItemPart);
-    // `block_drops` cannot name an item; it matches a drop against these two keys.
+    r.item_part(reconstructor_item, MachineItemPart);
+    // `block_drops` cannot name an item; it matches a drop against these keys.
     let _ = GENERATOR_ITEM.set(generator_item);
     let _ = CRUSHER_ITEM.set(crusher_item);
+    let _ = RECONSTRUCTOR_ITEM.set(reconstructor_item);
     // `block_entity_part` attaches the Part to the type's blocks as well, so registering
     // `GeneratorPart`/`CrusherPart` with `block_part` first would attach it twice and the game
     // refuses a duplicate ("attached twice, by actuallyadditions and actuallyadditions").
@@ -99,6 +122,9 @@ pub(crate) fn declare(r: &mut dyn Registrar, context: &RegistrationContext) {
         context.refuse(&error.to_string());
     }
     if let Err(error) = r.block_entity_part(&crusher_kind, CrusherPart) {
+        context.refuse(&error.to_string());
+    }
+    if let Err(error) = r.block_entity_part(&reconstructor_kind, ReconstructorPart) {
         context.refuse(&error.to_string());
     }
     // The Black Quartz Ore's generation (0.2.5). The carried `worldgen/configured_feature` and
@@ -173,6 +199,33 @@ pub(crate) fn crusher_battery() -> ModEnergyBuffer {
     }
 }
 
+/// The reconstructor's container: one lens slot. Automation may reach it but nothing may be
+/// inserted or taken: upstream's acceptor takes only an `ILensItem`, and no item in this package
+/// is one (1.3.26's sole lens source is the reconstructor's own lens cycle, which needs a lens to
+/// begin with), so a container that named the slot as insertable would let a hopper put any item
+/// there that upstream refuses.
+pub(crate) fn reconstructor_container() -> ModContainer {
+    ModContainer {
+        slots: RECONSTRUCTOR_SLOTS,
+        faces: std::array::from_fn(|_| vec![INPUT_SLOT]),
+        inputs: vec![],
+        outputs: vec![],
+        menu: None,
+    }
+}
+
+/// The reconstructor's buffer: upstream's `CustomEnergyStorage(300000, ceil(300000*0.016666), 0)`
+/// — it takes 5,000 CF a call and gives nothing out.
+pub(crate) fn reconstructor_battery() -> ModEnergyBuffer {
+    ModEnergyBuffer {
+        capacity: RECONSTRUCTOR_CAPACITY,
+        max_insert: RECONSTRUCTOR_MAX_INSERT,
+        max_extract: 0,
+        insert_faces: [true; 6],
+        extract_faces: [false; 6],
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The saved state
 // ---------------------------------------------------------------------------
@@ -220,6 +273,20 @@ pub(crate) fn read_crusher(saved: &Tag) -> Crusher {
 pub(crate) fn write_crusher(saved: &mut Tag, state: &Crusher) {
     set_int(saved, "energy", state.energy);
     set_int(saved, "progress", state.progress as i32);
+}
+
+/// The reconstructor a saved compound holds (`energy`, `cycle`).
+pub(crate) fn read_reconstructor(saved: &Tag) -> Reconstructor {
+    Reconstructor {
+        energy: clamp_energy(int(saved, "energy"), RECONSTRUCTOR_CAPACITY),
+        cycle: int(saved, "cycle").max(0) as u32,
+    }
+}
+
+/// Write the reconstructor back into a saved compound.
+pub(crate) fn write_reconstructor(saved: &mut Tag, state: &Reconstructor) {
+    set_int(saved, "energy", state.energy);
+    set_int(saved, "cycle", state.cycle as i32);
 }
 
 // ---------------------------------------------------------------------------
@@ -301,10 +368,38 @@ pub(crate) fn crusher_line(
     )
 }
 
+/// The reconstructor's report line: its buffer, comparator, facing, position in the cycle and the
+/// first block its beam meets with what that block converts into, then the world time.
+pub(crate) fn reconstructor_line(
+    pos: [i32; 3],
+    state: &Reconstructor,
+    facing: Option<&str>,
+    sight: &str,
+    lens: Option<(&str, u32)>,
+    t: i64,
+) -> String {
+    let facing = facing.unwrap_or("unknown");
+    let lens = match lens {
+        Some((item, count)) => format!("{item} x{count}"),
+        None => "default".to_owned(),
+    };
+    format!(
+        "Atomic Reconstructor at {},{},{}: {}/{} CF (comparator {}, facing {facing}, cycle {}/{}, \
+         lens {lens}, sight {sight}, t={t})",
+        pos[0],
+        pos[1],
+        pos[2],
+        state.energy,
+        RECONSTRUCTOR_CAPACITY,
+        reconstructor_comparator(state.energy),
+        state.cycle,
+        RECONSTRUCTOR_TICKS,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // The parsed recipe table
 // ---------------------------------------------------------------------------
-
 /// A crushing recipe with its engine-resolved ingredient.
 struct Resolved {
     ingredient: Ingredient,
@@ -365,6 +460,58 @@ pub(crate) fn find_recipe(host: &dyn Host, input: &ItemStack) -> Option<Crushing
 pub(crate) fn reset_recipes() {
     *RECIPES.lock().expect("the recipe cache lock is held") = None;
     RECIPE_TICKS.store(0, Ordering::Relaxed);
+    *LASER_RECIPES.lock().expect("the laser cache lock is held") = None;
+}
+
+/// A laser recipe with its engine-resolved ingredient.
+struct ResolvedLaser {
+    ingredient: Ingredient,
+    recipe: LaserRecipe,
+}
+
+/// The laser recipe table, rebuilt when a world loads and on the same cadence as the crusher's.
+static LASER_RECIPES: Mutex<Option<Vec<ResolvedLaser>>> = Mutex::new(None);
+
+/// The laser recipe whose ingredient the stack matches: upstream's
+/// `CONVERSION_LASER_RECIPES.stream().findFirst()`, which takes the engine's own order (the pin
+/// lists a type's recipes in file order).
+pub(crate) fn find_laser_recipe(host: &dyn Host, input: &ItemStack) -> Option<LaserRecipe> {
+    let due = RECIPE_TICKS
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(RECIPE_CACHE_TICKS);
+    let mut cache = LASER_RECIPES.lock().expect("the laser cache lock is held");
+    if cache.is_none() || due {
+        let mut resolved = Vec::new();
+        for recipe in host.recipes_of_type(LASER).iter() {
+            let text = recipe.json.to_string();
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            let Ok(parsed) = LaserRecipe::parse(&recipe.id, &text) else {
+                continue;
+            };
+            let ingredient = value
+                .get("ingredient")
+                .map(ingredient_json)
+                .and_then(|ingredient| {
+                    host.recipe_ingredient(&ingredient.to_string())
+                        .ok()
+                        .flatten()
+                });
+            if let Some(ingredient) = ingredient {
+                resolved.push(ResolvedLaser {
+                    ingredient,
+                    recipe: parsed,
+                });
+            }
+        }
+        *cache = Some(resolved);
+    }
+    let recipes = cache.as_ref()?;
+    recipes
+        .iter()
+        .find(|resolved| resolved.ingredient.test(host, input))
+        .map(|resolved| resolved.recipe.clone())
 }
 
 /// The item id a stack holds.
@@ -537,6 +684,147 @@ pub(crate) fn grow_output(
 }
 
 // ---------------------------------------------------------------------------
+// The Atomic Reconstructor's tick and beam
+// ---------------------------------------------------------------------------
+
+/// The block ids vanilla reads as empty (`Level.isEmptyBlock`): the beam passes through them.
+fn is_air(id: &str) -> bool {
+    matches!(
+        id,
+        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+    )
+}
+
+/// The block's own item (`new ItemStack(state.getBlock())`), which is what a laser recipe names.
+fn block_item_stack(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Option<ItemStack> {
+    let block = level.block(host, pos)?;
+    let item = host.block_item(block)?;
+    ItemStack::new(item, 1)
+}
+
+/// The direction the machine faces (`getOrientation` → `WorldUtil.getDirectionByPistonRotation`),
+/// read from the block's own `facing` state.
+fn facing_at(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Option<crate::runtime::Facing> {
+    let name = level.block_property(host, pos, "facing")?;
+    crate::runtime::Facing::from_name(&name)
+}
+
+/// One server tick of the reconstructor: the cycle, then the shot and its beam. True when the
+/// saved state changed.
+pub(crate) fn tick_reconstructor(
+    host: &mut dyn ServerHost,
+    level: Option<LevelRef>,
+    pos: [i32; 3],
+    saved: &mut Tag,
+) -> bool {
+    let before = read_reconstructor(saved);
+    let mut state = before.clone();
+    let powered = level.is_some_and(|level| level.has_neighbor_signal(&*host, pos));
+    if state.tick(powered)
+        && let Some(level) = level
+    {
+        fire_beam(host, level, pos, &mut state);
+    }
+    let changed = state != before;
+    write_reconstructor(saved, &state);
+    changed
+}
+
+/// `MethodHandler.invokeReconstructor`: pay the shot's 1000 CF, then walk the beam outward,
+/// converting the 3x3 plane around each block it meets. The beam stops at the first block that
+/// is not air, or after [`RECONSTRUCTOR_LENS_DISTANCE`] blocks.
+fn fire_beam(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], state: &mut Reconstructor) {
+    let Some(facing) = facing_at(&*host, level, pos) else {
+        return;
+    };
+    if state.fire().is_none() {
+        return;
+    }
+    let step = facing.offset();
+    for distance in 1..=RECONSTRUCTOR_LENS_DISTANCE {
+        let hit = [
+            pos[0] + step[0] * distance,
+            pos[1] + step[1] * distance,
+            pos[2] + step[2] * distance,
+        ];
+        convert_plane(host, level, hit, facing, state);
+        let solid = block_id(&*host, level, hit).is_some_and(|id| !is_air(&id));
+        if solid || distance == RECONSTRUCTOR_LENS_DISTANCE {
+            break;
+        }
+    }
+}
+
+/// `MethodHandler.invokeConversionLens`'s block half: every block of the plane the hit block sits
+/// in whose laser recipe the remaining CF still covers, in upstream's order. A block with no
+/// recipe, or one the buffer cannot pay for, is left alone and the scan goes on.
+fn convert_plane(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    hit: [i32; 3],
+    facing: crate::runtime::Facing,
+    state: &mut Reconstructor,
+) {
+    for at in conversion_plane(hit, facing) {
+        if block_id(&*host, level, at).is_none_or(|id| is_air(&id)) {
+            continue;
+        }
+        let Some(stack) = block_item_stack(&*host, level, at) else {
+            continue;
+        };
+        let Some(recipe) = find_laser_recipe(&*host, &stack) else {
+            continue;
+        };
+        if !state.can_afford(recipe.energy) {
+            continue;
+        }
+        if apply_conversion(host, level, at, &recipe) {
+            state.spend(recipe.energy);
+        }
+    }
+}
+
+/// One conversion: a block result is placed, any other result is dropped as an item at the
+/// block's centre and the block becomes air (upstream's `BlockItem` branch and its else).
+fn apply_conversion(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    at: [i32; 3],
+    recipe: &LaserRecipe,
+) -> bool {
+    let result_json = recipe.result.to_string();
+    let Some(result) = host.recipe_result(&result_json).ok().flatten() else {
+        return false;
+    };
+    if result.count() == 0 {
+        return false;
+    }
+    if let Some(block) = host.item_block(result.item()) {
+        let Some(state) = host.block_state_default(block) else {
+            return false;
+        };
+        return level
+            .set_block(host, at, state, BlockUpdateFlags::CLIENTS)
+            .unwrap_or(false);
+    }
+    let centre = [
+        f64::from(at[0]) + 0.5,
+        f64::from(at[1]) + 0.5,
+        f64::from(at[2]) + 0.5,
+    ];
+    if level
+        .spawn_item(host, centre[0], centre[1], centre[2], result, 10)
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return false;
+    }
+    level.remove_block(host, at, false);
+    true
+}
+
+// ---------------------------------------------------------------------------
 // The energy push
 // ---------------------------------------------------------------------------
 
@@ -560,7 +848,7 @@ pub(crate) fn clear_push_queue() {
     PUSH.lock().expect("the push queue lock is held").clear();
 }
 
-/// After a level's tick: every queued generator pushes its FE into the crushers beside it, through
+/// After a level's tick: every queued generator pushes its FE into the machines beside it, through
 /// the energy capabilities (`move_energy`, the counterpart of `native_move_energy`).
 pub(crate) fn on_level_tick_post(host: &mut dyn ServerHost, level: LevelRef) {
     let queued = {
@@ -588,14 +876,15 @@ pub(crate) fn on_level_tick_post(host: &mut dyn ServerHost, level: LevelRef) {
     }
 }
 
-/// One generator's six neighbours: each crusher beside it takes up to the generator's extract
-/// limit, as upstream's buffers do.
+/// One generator's six neighbours: each machine beside it that takes FE in — the crusher and the
+/// atomic reconstructor — takes up to the generator's extract limit, as upstream's cables would.
 fn push_generator_energy(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) {
     let limit = u32::try_from(GENERATOR_MAX_EXTRACT).unwrap_or(0);
     for side in mod_api::Direction::ALL {
         let [dx, dy, dz] = side.normal();
         let neighbour = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
-        if block_id(host, level, neighbour).as_deref() != Some(CRUSHER) {
+        let kind = block_id(host, level, neighbour);
+        if kind.as_deref() != Some(CRUSHER) && kind.as_deref() != Some(RECONSTRUCTOR) {
             continue;
         }
         let _ = host.transaction(|host, tx| -> Result<u32, ()> {
@@ -665,6 +954,31 @@ pub(crate) fn machine_click(
     Some(InteractionResult::Success)
 }
 
+/// A right click on the reconstructor. Upstream fills its lens slot from a hand holding an
+/// `ILensItem` and hands a lens back on the same-item click; **no item in this package is a lens**
+/// (1.3.26's only lens source is the reconstructor's own four-recipe lens cycle, which needs a
+/// lens to start), so the slot can never be filled and every held item is refused. An empty hand
+/// reads the status line, as on the other two machines: this slice has no GUI
+/// (`blocked(no-single-player-mod-screen)`).
+pub(crate) fn reconstructor_click(
+    host: &mut dyn ServerHost,
+    click: &BlockClick<'_>,
+    held: Option<&ItemStack>,
+) -> Option<InteractionResult> {
+    let level = host.level(click.dimension.key().id())?;
+    if block_id(&*host, level, click.pos).as_deref() != Some(RECONSTRUCTOR) {
+        return None;
+    }
+    let line = match held.filter(|stack| stack.count() > 0) {
+        Some(stack) => format!("{} is not a lens", item_id(&*host, stack)),
+        None => status_line(host, click.pos),
+    };
+    if let Some(player) = host.player(click.player) {
+        let _ = player.action_bar(host, Text::literal(line));
+    }
+    Some(InteractionResult::Success)
+}
+
 /// Insert as much of the held stack as the input slot takes, and take exactly that from the hand,
 /// in one transaction (a creative player's hand gives without losing any).
 fn insert_from_hand(
@@ -730,6 +1044,7 @@ const BLOCK_ENTITY_DATA: &str = "minecraft:block_entity_data";
 /// (`TypedEntityData.loadInto` only loads data whose `id` names the entity it is placed as).
 const GENERATOR_TYPE_ID: &str = "actuallyadditions:coal_generator_block_entity";
 const CRUSHER_TYPE_ID: &str = "actuallyadditions:crusher_block_entity";
+const RECONSTRUCTOR_TYPE_ID: &str = "actuallyadditions:atomic_reconstructor_block_entity";
 
 /// A compound's key for `name`. [`Compound`]'s key type is not exported, so the key is taken
 /// from a string tag's own payload: the same conversion a mod's NBT string uses.
@@ -757,18 +1072,23 @@ fn get<'a>(nbt: &'a Compound, name: &str) -> Option<&'a Tag> {
 const GENERATOR_STATE_KEYS: [&str; 3] = ["energy", "burn", "burn_max"];
 /// The saved values a crusher's item carries: exactly what [`read_crusher`] reads back.
 const CRUSHER_STATE_KEYS: [&str; 2] = ["energy", "progress"];
+/// The saved values a reconstructor's item carries: its buffer (upstream's loot copies the
+/// `actuallyadditions:energy` component and not the cycle, which is sync-only there).
+const RECONSTRUCTOR_STATE_KEYS: [&str; 1] = ["energy"];
 
 /// The machines' own items, resolved once at registration. `block_drops` runs with a read-only
 /// [`LevelHost`], which cannot name an item, so the drop is matched against the key registration
 /// already resolved — and only a machine's own drop may take its state.
 static GENERATOR_ITEM: OnceLock<ItemKey> = OnceLock::new();
 static CRUSHER_ITEM: OnceLock<ItemKey> = OnceLock::new();
+static RECONSTRUCTOR_ITEM: OnceLock<ItemKey> = OnceLock::new();
 
 /// The item key of the machine `block` names, once registration has resolved it.
 fn machine_item(block: &str) -> Option<ItemKey> {
     match block {
         GENERATOR => GENERATOR_ITEM.get().copied(),
         CRUSHER => CRUSHER_ITEM.get().copied(),
+        RECONSTRUCTOR => RECONSTRUCTOR_ITEM.get().copied(),
         _ => None,
     }
 }
@@ -804,6 +1124,7 @@ pub(crate) fn on_block_drops(level: &dyn LevelHost, event: &mut BlockDropsEvent<
     let Some((type_id, keys)) = (match block {
         GENERATOR => Some((GENERATOR_TYPE_ID, GENERATOR_STATE_KEYS.as_slice())),
         CRUSHER => Some((CRUSHER_TYPE_ID, CRUSHER_STATE_KEYS.as_slice())),
+        RECONSTRUCTOR => Some((RECONSTRUCTOR_TYPE_ID, RECONSTRUCTOR_STATE_KEYS.as_slice())),
         _ => None,
     }) else {
         return Flow::Continue;
@@ -875,6 +1196,16 @@ impl ItemPart for MachineItemPart {
                     false
                 }
             }
+            Some(RECONSTRUCTOR) => {
+                let current = read_reconstructor(&saved);
+                let restored = restored_reconstructor(current.energy, current.cycle as i32);
+                if restored != current {
+                    write_reconstructor(&mut saved, &restored);
+                    true
+                } else {
+                    false
+                }
+            }
             _ => false,
         };
         if changed && let Tag::Compound(data) = saved {
@@ -887,14 +1218,21 @@ impl ItemPart for MachineItemPart {
 // The command
 // ---------------------------------------------------------------------------
 
-/// `/actuallyadditions info <pos>`: the harness's readout of one machine (a harness addition, as
-/// the 0.1.0 command was; there is no GUI in this slice).
+/// `/actuallyadditions info <pos>` and `/actuallyadditions charge <pos> <amount>`: the harness's
+/// readout and charger (harness additions, as the 0.1.0 command was; there is no GUI in this
+/// slice and a single-player world has no charger or cable to fill a buffer with).
 pub(crate) fn declare_commands(commands: &mut Vec<Command>) {
     // The readout names a crusher's input, its count and its recipe anywhere in the level,
     // so it is registered at the operator level `/data get block` needs (2, game master) and
     // its body asks again before reading anything.
     commands.push(Command::op(
         "actuallyadditions info <pos:block_pos>",
+        OPERATOR_LEVEL,
+    ));
+    // `charge` writes a machine's buffer, so it is a game master's command too: it is how the
+    // harness (or a player without a cable) fills the Atomic Reconstructor's 300,000 CF.
+    commands.push(Command::op(
+        "actuallyadditions charge <pos:block_pos> <amount:integer>",
         OPERATOR_LEVEL,
     ));
 }
@@ -909,6 +1247,44 @@ fn may_read(permission: mod_api::PermissionLevel) -> bool {
     permission.level() >= OPERATOR_LEVEL
 }
 
+/// The line a reconstructor's beam sights: the first block it meets and what that block converts
+/// into (`sight actuallyadditions:redstone_wire -> actuallyadditions:restonia_crystal @ 40 CF`).
+fn reconstructor_sight(
+    host: &dyn Host,
+    level: LevelRef,
+    pos: [i32; 3],
+    facing: Option<crate::runtime::Facing>,
+) -> String {
+    let Some(facing) = facing else {
+        return "unknown".to_owned();
+    };
+    let step = facing.offset();
+    for distance in 1..=RECONSTRUCTOR_LENS_DISTANCE {
+        let at = [
+            pos[0] + step[0] * distance,
+            pos[1] + step[1] * distance,
+            pos[2] + step[2] * distance,
+        ];
+        let Some(block) = block_id(host, level, at) else {
+            return "nothing".to_owned();
+        };
+        if is_air(&block) {
+            continue;
+        }
+        return match block_item_stack(host, level, at)
+            .and_then(|stack| find_laser_recipe(host, &stack))
+        {
+            Some(recipe) => format!(
+                "{block} -> {} @ {} CF",
+                recipe.result_id().unwrap_or("nothing"),
+                recipe.energy
+            ),
+            None => format!("{block} -> nothing"),
+        };
+    }
+    "nothing".to_owned()
+}
+
 /// The one line the command prints for the block at `pos`.
 pub(crate) fn status_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
     let Some(level) = host.level(host.dimension()) else {
@@ -917,7 +1293,7 @@ pub(crate) fn status_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
     let Some(kind) = block_id(&*host, level, pos) else {
         return NO_MACHINE.to_owned();
     };
-    if kind != GENERATOR && kind != CRUSHER {
+    if kind != GENERATOR && kind != CRUSHER && kind != RECONSTRUCTOR {
         return NO_MACHINE.to_owned();
     }
     let Some(entity) = host.block_entity(level, pos) else {
@@ -937,6 +1313,18 @@ pub(crate) fn status_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
         return generator_line(
             pos,
             &read_generator(&saved),
+            fuel.as_ref().map(|(item, count)| (item.as_str(), *count)),
+            t,
+        );
+    }
+    if kind == RECONSTRUCTOR {
+        let facing = facing_at(&*host, level, pos);
+        let sight = reconstructor_sight(&*host, level, pos, facing);
+        return reconstructor_line(
+            pos,
+            &read_reconstructor(&saved),
+            facing.map(crate::runtime::Facing::name),
+            &sight,
             fuel.as_ref().map(|(item, count)| (item.as_str(), *count)),
             t,
         );
@@ -961,24 +1349,95 @@ pub(crate) fn status_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
     crusher_line(pos, &read_crusher(&saved), texts, recipe.as_ref(), t)
 }
 
-/// Run `/actuallyadditions info <pos>`; `Flow::Cancel` when it was ours.
+/// Run `/actuallyadditions info <pos>` or `… charge <pos> <amount>`; `Flow::Cancel` when it was
+/// ours.
 pub(crate) fn run_command(host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>) -> Flow {
     let literals: Vec<&str> = event.command.literals.iter().map(String::as_str).collect();
-    if literals.as_slice() != ["actuallyadditions", "info"] {
+    let [root, sub] = literals.as_slice() else {
+        return Flow::Continue;
+    };
+    if *root != "actuallyadditions" {
         return Flow::Continue;
     }
     if !may_read(event.source.permission()) {
         let _ = host.commands().feedback(Text::literal(format!(
-            "actuallyadditions info needs an operator (permission level {OPERATOR_LEVEL})"
+            "actuallyadditions {sub} needs an operator (permission level {OPERATOR_LEVEL})"
         )));
         return Flow::Cancel;
     }
-    let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
-        return Flow::Continue;
-    };
-    let line = status_line(host, *pos);
-    let _ = host.commands().feedback(Text::literal(line));
+    match *sub {
+        "info" => {
+            let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
+                return Flow::Continue;
+            };
+            let line = status_line(host, *pos);
+            let _ = host.commands().feedback(Text::literal(line));
+        }
+        "charge" => {
+            let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
+                return Flow::Continue;
+            };
+            let Some(CommandArgumentValue::Integer(amount)) = event.command.argument("amount")
+            else {
+                return Flow::Continue;
+            };
+            let line = charge_block(host, *pos, *amount);
+            let _ = host.commands().feedback(Text::literal(line));
+        }
+        _ => return Flow::Continue,
+    }
     Flow::Cancel
+}
+
+/// The body of `/actuallyadditions charge <pos> <amount>`: bring one of this mod's buffers **to**
+/// `amount` CF the way a charger's cable would — as many inserts through the block's energy
+/// capability as the buffer takes per call (`max_insert`, 5,000 CF on the reconstructor). A buffer
+/// already at or above the target is left alone (the declaration gives no FE out), so the command
+/// never invents a drain. Prints what the buffer was, what went in and what it holds afterwards,
+/// read back from the block entity's own saved compound.
+fn charge_block(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) -> String {
+    let Some(level) = host.level(host.dimension()) else {
+        return NO_MACHINE.to_owned();
+    };
+    let Some(kind) = block_id(&*host, level, pos) else {
+        return NO_MACHINE.to_owned();
+    };
+    if kind != CRUSHER && kind != RECONSTRUCTOR {
+        return format!("{kind} at {},{},{} takes no charge", pos[0], pos[1], pos[2]);
+    }
+    let stored = |host: &dyn ServerHost| {
+        host.block_entity(level, pos)
+            .and_then(|entity| entity.data(host))
+            .map_or(0, |saved| int(&Tag::Compound(saved), "energy"))
+    };
+    let before = stored(&*host);
+    let wanted = u32::try_from(amount.max(0).saturating_sub(before)).unwrap_or(0);
+    let mut inserted = 0u32;
+    // The buffer takes `max_insert` a call, so one insert is not enough; a buffer that takes
+    // nothing (full, or no capability) ends the loop.
+    for _ in 0..64 {
+        if inserted >= wanted {
+            break;
+        }
+        let missing = wanted - inserted;
+        let took = host
+            .transaction(|host, tx| -> Result<u32, ()> {
+                let Some(buffer) = level.capability(&mut *host, &ENERGY, pos, None) else {
+                    return Ok(0);
+                };
+                Ok(buffer.insert(&mut *host, tx, missing))
+            })
+            .unwrap_or(0);
+        if took == 0 {
+            break;
+        }
+        inserted += took;
+    }
+    let after = stored(&*host);
+    format!(
+        "charged {kind} at {},{},{}: {before} -> {after} CF (inserted {inserted})",
+        pos[0], pos[1], pos[2]
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,6 +1546,79 @@ impl BlockEntityPart for CrusherPart {
         let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
         let items = &mut event.entity.items;
         let changed = tick_crusher(host, level, &mut saved, items);
+        if let Tag::Compound(nbt) = saved {
+            event.entity.nbt = nbt;
+        }
+        if !changed {
+            *event.reply = BlockEntityTickReply::Unchanged;
+        }
+    }
+}
+
+/// The Atomic Reconstructor: it ticks, its click hands back a lens (none exists here) and its
+/// placement faces away from the player.
+pub(crate) struct ReconstructorPart;
+
+#[mod_api::horizon_part]
+impl BlockPart for ReconstructorPart {
+    /// `FullyDirectionalBlock.getStateForPlacement`: `getNearestLookingDirection().getOpposite()`
+    /// — the beam points away from the player who placed the machine.
+    fn state_for_placement(
+        &self,
+        level: &dyn LevelHost,
+        event: &mut StateForPlacementEvent<'_>,
+    ) -> Option<Option<BlockState>> {
+        let block = level.state_block(event.state)?;
+        if block != RECONSTRUCTOR {
+            return None;
+        }
+        let facing = facing_for_placement(event.context.yaw, event.context.pitch);
+        Some(Some(level.block_state_id(&format!(
+            "{block}[facing={}]",
+            facing.name()
+        ))?))
+    }
+
+    fn use_item_on(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut mod_api::UseItemOnEvent<'_>,
+    ) -> Option<InteractionResult> {
+        reconstructor_click(host, event.click, event.click.stack)
+    }
+
+    fn use_without_item(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut mod_api::UseWithoutItemEvent<'_>,
+    ) -> Option<InteractionResult> {
+        reconstructor_click(host, event.click, None)
+    }
+}
+
+#[mod_api::horizon_part]
+impl BlockEntityPart for ReconstructorPart {
+    fn block_entity(
+        &self,
+        _level: LevelSide,
+        _event: &mut BlockEntityEvent<'_>,
+    ) -> Option<Compound> {
+        Some(Compound::new())
+    }
+
+    fn block_entity_ticks(&self, _host: &dyn Host, event: &mut BlockEntityTicksEvent<'_>) {
+        event.ticks = true;
+    }
+
+    /// One server tick: the cycle and, when it reaches zero, the shot and its beam.
+    fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+        let pos = event.pos;
+        let level = in_place_level(host);
+        if event.entity.items.len() != RECONSTRUCTOR_SLOTS {
+            event.entity.items.resize(RECONSTRUCTOR_SLOTS, None);
+        }
+        let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
+        let changed = tick_reconstructor(host, level, pos, &mut saved);
         if let Tag::Compound(nbt) = saved {
             event.entity.nbt = nbt;
         }
@@ -1285,7 +1817,7 @@ mod tests {
     fn the_command_is_the_readout_at_the_operator_level() {
         let mut commands = Vec::new();
         declare_commands(&mut commands);
-        assert_eq!(commands.len(), 1);
+        assert_eq!(commands.len(), 2);
         assert_eq!(
             commands[0].usage, "actuallyadditions info <pos:block_pos>",
             "the 0.1.0 spelling, with the three words parsed as one block position"
@@ -1294,6 +1826,115 @@ mod tests {
             commands[0].level, OPERATOR_LEVEL,
             "the readout names another player's machine contents, so it needs an operator"
         );
+        assert_eq!(
+            commands[1].usage, "actuallyadditions charge <pos:block_pos> <amount:integer>",
+            "the harness charger (0.2.6) writes a buffer, so it is a game master's command too"
+        );
+        assert_eq!(commands[1].level, OPERATOR_LEVEL);
+    }
+
+    #[test]
+    fn the_reconstructor_has_one_lens_slot_and_nothing_can_fill_it() {
+        let container = reconstructor_container();
+        assert_eq!(container.slots, RECONSTRUCTOR_SLOTS, "one lens slot");
+        assert!(container.inputs.is_empty(), "no lens item exists to accept");
+        assert!(container.outputs.is_empty());
+        assert_eq!(container.menu, None, "no GUI in this slice");
+        let battery = reconstructor_battery();
+        assert_eq!(battery.capacity, RECONSTRUCTOR_CAPACITY);
+        assert_eq!(
+            battery.max_insert, RECONSTRUCTOR_MAX_INSERT,
+            "upstream's ceil(300000 * 0.016666)"
+        );
+        assert_eq!(battery.max_extract, 0, "the reconstructor gives no FE out");
+        assert_eq!(battery.insert_faces, [true; 6]);
+        assert_eq!(battery.extract_faces, [false; 6]);
+    }
+
+    #[test]
+    fn the_reconstructor_state_reads_back_from_its_compound() {
+        let empty = compound();
+        assert_eq!(read_reconstructor(&empty), Reconstructor::new());
+        let mut saved = compound();
+        let state = Reconstructor {
+            energy: 1_040,
+            cycle: 37,
+        };
+        write_reconstructor(&mut saved, &state);
+        assert_eq!(read_reconstructor(&saved), state);
+        assert_eq!(saved.get("energy"), Some(&Tag::Int(1_040)));
+        assert_eq!(saved.get("cycle"), Some(&Tag::Int(37)));
+        set_int(&mut saved, "energy", RECONSTRUCTOR_CAPACITY + 1);
+        assert_eq!(
+            read_reconstructor(&saved).energy,
+            RECONSTRUCTOR_CAPACITY,
+            "a stale buffer reads clamped"
+        );
+    }
+
+    #[test]
+    fn the_reconstructor_line_is_the_one_the_e2e_asserts() {
+        let state = Reconstructor {
+            energy: 1_040,
+            cycle: 63,
+        };
+        assert_eq!(
+            reconstructor_line(
+                [10, 100, 0],
+                &state,
+                Some("east"),
+                "minecraft:redstone_wire -> actuallyadditions:restonia_crystal @ 40 CF",
+                None,
+                123
+            ),
+            "Atomic Reconstructor at 10,100,0: 1040/300000 CF (comparator 0, facing east, cycle \
+             63/100, lens default, sight minecraft:redstone_wire -> \
+             actuallyadditions:restonia_crystal @ 40 CF, t=123)"
+        );
+    }
+
+    #[test]
+    fn the_reconstructors_drop_carries_its_buffer_and_not_its_cycle() {
+        let mut saved = compound();
+        write_reconstructor(
+            &mut saved,
+            &Reconstructor {
+                energy: 5_000,
+                cycle: 12,
+            },
+        );
+        let Tag::Compound(nbt) = &saved else {
+            panic!("the saved data is a compound");
+        };
+        let patch = Tag::Compound(entity_data_patch(
+            nbt,
+            RECONSTRUCTOR_TYPE_ID,
+            &RECONSTRUCTOR_STATE_KEYS,
+        ));
+        let Some(payload) = patch.get(BLOCK_ENTITY_DATA) else {
+            panic!("the patch names the vanilla component");
+        };
+        assert_eq!(payload.get("energy"), Some(&Tag::Int(5_000)));
+        assert_eq!(
+            payload.get("cycle"),
+            None,
+            "upstream's loot copies the energy component only; the cycle is sync-only there"
+        );
+        assert_eq!(
+            payload.get("id"),
+            Some(&Tag::String(RECONSTRUCTOR_TYPE_ID.into()))
+        );
+        assert_eq!(read_reconstructor(payload).energy, 5_000);
+    }
+
+    #[test]
+    fn the_air_the_beam_passes_through_is_vanillas_own_list() {
+        assert!(is_air("minecraft:air"));
+        assert!(is_air("minecraft:cave_air"));
+        assert!(is_air("minecraft:void_air"));
+        assert!(!is_air("minecraft:stone"));
+        assert!(!is_air("minecraft:water"));
+        assert!(!is_air("actuallyadditions:atomic_reconstructor"));
     }
 
     #[test]

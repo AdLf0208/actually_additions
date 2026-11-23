@@ -4,10 +4,10 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "actuallyadditions"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 license = "MIT"
-description = "Actually Additions for Horizon: the Coal Generator, the Crusher, the crafting chain and the Black Quartz Ore"
+description = "Actually Additions for Horizon: the Coal Generator, the Crusher, the Atomic Reconstructor, the crafting chain and the Black Quartz Ore"
 publish = false
 
 [dependencies]

@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Craft the Coal Generator's own recipe in a real crafting table.
+"""Craft this package's recipes in a real crafting table.
 
 Called by `tools/e2e.sh` with the open game's control socket. The harness's
 crafting table exposes the 3x3 grid as slots 100-108 (row-major) and the result
 as 200, and reports them through `ctl screen` (`craft_size` 3). A slot click
 needs the rendered screen layout, which is why the e2e launches `--offscreen`.
 
-The recipe under test is `data/actuallyadditions/recipe/coal_generator.json`
-(pattern `CIC / CAC / CIC`). Until 0.2.4 the loader dropped it — the load log
-named `#c:cobblestones` and the three `actuallyadditions:` items it keys on — so
-the game had no Coal Generator recipe at all. The phases:
+The recipes under test are `data/actuallyadditions/recipe/*.json`. Until 0.2.4
+the loader dropped the Coal Generator's — the load log named `#c:cobblestones`
+and the three `actuallyadditions:` items it keys on — so the game had no Coal
+Generator recipe at all. The phases:
 
   A  `recipe give @s actuallyadditions:coal_generator` unlocks exactly one
-     recipe, and `give actuallyadditions:restonia_crystal` is refused: the item
-     does not exist in this slice, which is what keeps the Crusher's recipe
-     uncraftable;
+     recipe, and (0.2.6) `give actuallyadditions:restonia_crystal` now answers:
+     the Atomic Reconstructor's beam makes the crystal, so the Crusher's recipe's
+     last key exists;
   B  the pattern crafts one Coal Generator, and all nine items are
      consumed (six cobblestone — the pattern's six C cells — two iron casings, one coal) with an
      empty grid;
@@ -23,20 +23,25 @@ the game had no Coal Generator recipe at all. The phases:
   D  two controls stay empty — `minecraft:iron_ingot` where the casings go (the
      brief's differential) and `minecraft:stone` in the cobblestone cells (a
      block the `c:cobblestones` tag must not contain);
-  E  the Crusher's own recipe (`RFC / BIB / CFR`) stays uncraftable: every key it
-     can get is placed correctly and its two `restonia_crystal` cells are left
-     empty (the only thing a player could do), and the result must stay empty —
-     that recipe is `blocked(restonia_crystal_source)`;
+  E  (0.2.6) the Crusher's own recipe (`RFC / BIB / CFR`) now crafts one machine
+     from its nine keys — two restonia crystals, two flint, two cobblestone, two
+     basic coils and one iron casing — every ingredient consumed. It was
+     `blocked(restonia_crystal_source)` until the beam could make the crystal;
   F  the Iron Casing's own recipe (0.2.5, `WSW / SQS / WSW`) unlocks and crafts one
      casing from four iron ingots (`#c:ingots/iron`), four sticks (`#c:rods/wooden`)
      and one `actuallyadditions:black_quartz`, every ingredient consumed;
   G  a tag member that is not a member stays empty — gold ingots where the
      `#c:ingots/iron` cells go (a wildcard tag would craft);
-  H  the same for `#c:rods/wooden` — coal in its cells leaves the result empty.
+  H  the same for `#c:rods/wooden` — coal in its cells leaves the result empty;
+  I  (0.2.6) the Atomic Reconstructor's own recipe (`IRI / RCR / IRI`) crafts one
+     machine from four iron ingots (`#c:ingots/iron`), four redstone
+     (`#c:dusts/redstone`) and one iron casing, all nine consumed;
+  J  its two tag keys are not wildcards — gold ingots in the iron cells and
+     glowstone dust in the redstone cells each leave the result empty.
 
-`--negative` is the counterfactual: it asserts the *pre-0.2.4* state (the recipe
-is not unlocked) and therefore must fail on this package, proving phase A can
-fail.
+`--negative` is the counterfactual: it asserts the *pre-0.2.4* state (the Coal
+Generator's recipe is not unlocked) and therefore must fail on this package,
+proving phase A can fail.
 
     python3 tools/craft_check.py SOCK CTL X Y Z [--negative]
 """
@@ -69,6 +74,9 @@ CRUSHER_CELLS = {
 # `S` = `#c:rods/wooden`, `Q` = `actuallyadditions:black_quartz`.
 IRON_CELLS = [GRID["tl"], GRID["tr"], GRID["bl"], GRID["br"]]
 ROD_CELLS = [GRID["tm"], GRID["ml"], GRID["mr"], GRID["bm"]]
+# The Atomic Reconstructor (0.2.6), `IRI / RCR / IRI`: `I` = `#c:ingots/iron` in
+# the corners, `R` = `#c:dusts/redstone` in the edge middles, `C` = the casing.
+REDSTONE_CELLS = ROD_CELLS
 
 
 def main() -> int:
@@ -140,12 +148,16 @@ def main() -> int:
                 "`recipe give @s actuallyadditions:coal_generator` did not unlock one recipe "
                 f"(the recipe is absent or invalid): {text}"
             )
-        # The missing item that keeps the Crusher's recipe uncraftable. Printing the
-        # crusher's own `recipe give` reply records whether the loader kept the recipe
-        # with an unsatisfiable key or dropped it; phase E asserts the behaviour that
-        # matters (it never crafts).
-        say("  (recorded, not asserted) crusher recipe in the book: "
-            f"{json.dumps(run('command', 'recipe give @s actuallyadditions:crusher'))}")
+        # The item the Crusher's recipe waits on (0.2.6): the Atomic Reconstructor's beam makes it,
+        # so it must now exist — a refusal here means the crystal did not ship and the Crusher's
+        # recipe would be back to `blocked(restonia_crystal_source)`.
+        crusher_recipe = run("command", "recipe give @s actuallyadditions:crusher")
+        say(f"  recipe give actuallyadditions:crusher -> {json.dumps(crusher_recipe)}")
+        if "Unlocked 1 recipe" not in " ".join(crusher_recipe.get("chat", [])):
+            failures.append(
+                "`recipe give @s actuallyadditions:crusher` did not unlock one recipe — the "
+                f"loader dropped it: {json.dumps(crusher_recipe)}"
+            )
         # The Iron Casing's own recipe (0.2.5): it resolves only if both `c:` tags and the gem
         # are present. An empty tag file is dropped at load, which drops the recipe with it, so
         # this unlock is the in-game half of the "empty tag" trap.
@@ -157,12 +169,20 @@ def main() -> int:
                 "recipe is absent, or one of its two `c:` tags resolved to nothing and the "
                 f"loader dropped it: {json.dumps(casing)}"
             )
-        refused = run("give", "actuallyadditions:restonia_crystal", "1")
-        say(f"  give actuallyadditions:restonia_crystal -> {json.dumps(refused)}")
-        if "unknown item" not in json.dumps(refused):
+        reconstructor = run("command", "recipe give @s actuallyadditions:atomic_reconstructor")
+        say(f"  recipe give actuallyadditions:atomic_reconstructor -> {json.dumps(reconstructor)}")
+        if "Unlocked 1 recipe" not in " ".join(reconstructor.get("chat", [])):
             failures.append(
-                "actuallyadditions:restonia_crystal resolved, so the Crusher's blocked recipe "
-                f"would need re-testing: {json.dumps(refused)}"
+                "`recipe give @s actuallyadditions:atomic_reconstructor` did not unlock one "
+                f"recipe — `#c:dusts/redstone` did not resolve, or the recipe is absent: "
+                f"{json.dumps(reconstructor)}"
+            )
+        given = run("give", "actuallyadditions:restonia_crystal", "1")
+        say(f"  give actuallyadditions:restonia_crystal -> {json.dumps(given)}")
+        if "unknown item" in json.dumps(given):
+            failures.append(
+                "actuallyadditions:restonia_crystal is refused, so the Crusher's recipe's last "
+                f"key still cannot exist: {json.dumps(given)}"
             )
 
     # A fresh table (a replaced block entity, so the grid starts empty), the exact
@@ -306,17 +326,28 @@ def main() -> int:
         ],
     )
 
-    # E: the Crusher's recipe with everything it can get, its crystal cells empty.
-    empty_control(
-        "control: the Crusher's own recipe without restonia_crystal (blocked)",
-        [("minecraft:flint", 4), ("minecraft:cobblestone", 4),
-         ("actuallyadditions:basic_coil", 4), ("actuallyadditions:iron_casing", 2)],
+    # E: the Crusher's recipe, whose last key the Atomic Reconstructor's beam now makes (0.2.6).
+    craft(
+        "crusher (2 restonia + 2 flint + 2 cobblestone + 2 coils + 1 casing)",
+        [("actuallyadditions:restonia_crystal", 4), ("minecraft:flint", 4),
+         ("minecraft:cobblestone", 4), ("actuallyadditions:basic_coil", 4),
+         ("actuallyadditions:iron_casing", 2)],
         [
+            ("actuallyadditions:restonia_crystal", CRUSHER_CELLS["r"]),
             ("minecraft:flint", CRUSHER_CELLS["f"]),
             ("minecraft:cobblestone", CRUSHER_CELLS["c"]),
             ("actuallyadditions:basic_coil", CRUSHER_CELLS["b"]),
             ("actuallyadditions:iron_casing", CRUSHER_CELLS["i"]),
         ],
+        {
+            "actuallyadditions:restonia_crystal": 2,
+            "minecraft:flint": 2,
+            "minecraft:cobblestone": 2,
+            "actuallyadditions:basic_coil": 2,
+            "actuallyadditions:iron_casing": 1,
+            "actuallyadditions:crusher": 1,
+        },
+        result_item="actuallyadditions:crusher",
     )
 
     # F: the Iron Casing's own recipe (0.2.5), from the two convention tags and the gem.
@@ -362,6 +393,49 @@ def main() -> int:
         ],
     )
 
+    # I: the Atomic Reconstructor's own recipe (0.2.6), `IRI / RCR / IRI`.
+    craft(
+        "atomic reconstructor (4 iron ingots + 4 redstone + 1 iron casing)",
+        [("minecraft:iron_ingot", 6), ("minecraft:redstone", 6),
+         ("actuallyadditions:iron_casing", 2)],
+        [
+            ("minecraft:iron_ingot", IRON_CELLS),
+            ("minecraft:redstone", REDSTONE_CELLS),
+            ("actuallyadditions:iron_casing", [CENTRE]),
+        ],
+        {
+            "minecraft:iron_ingot": 2,
+            "minecraft:redstone": 2,
+            "actuallyadditions:iron_casing": 1,
+            "actuallyadditions:atomic_reconstructor": 1,
+        },
+        result_item="actuallyadditions:atomic_reconstructor",
+    )
+
+    # J: its two tag keys are not wildcards — gold ingots where `#c:ingots/iron` goes …
+    empty_control(
+        "control: gold ingots where #c:ingots/iron goes (not a member)",
+        [("minecraft:gold_ingot", 6), ("minecraft:redstone", 6),
+         ("actuallyadditions:iron_casing", 2)],
+        [
+            ("minecraft:gold_ingot", IRON_CELLS),
+            ("minecraft:redstone", REDSTONE_CELLS),
+            ("actuallyadditions:iron_casing", [CENTRE]),
+        ],
+    )
+
+    # … and glowstone dust where `#c:dusts/redstone` goes.
+    empty_control(
+        "control: glowstone dust where #c:dusts/redstone goes (not a member)",
+        [("minecraft:iron_ingot", 6), ("minecraft:glowstone_dust", 6),
+         ("actuallyadditions:iron_casing", 2)],
+        [
+            ("minecraft:iron_ingot", IRON_CELLS),
+            ("minecraft:glowstone_dust", REDSTONE_CELLS),
+            ("actuallyadditions:iron_casing", [CENTRE]),
+        ],
+    )
+
     try:
         run("close")
     except SystemExit:
@@ -378,8 +452,13 @@ def main() -> int:
           "for stone in the cobblestone cells; the Iron Casing's own recipe unlocks and crafts one "
           "casing from four iron ingots (#c:ingots/iron), four sticks (#c:rods/wooden) and one "
           "black quartz, all nine consumed, and stays empty for gold ingots in the ingot cells and "
-          "coal in the rod cells; the Crusher's recipe stays uncraftable "
-          "(blocked(restonia_crystal_source))")
+          "coal in the rod cells; the Crusher's recipe — blocked on restonia_crystal until the "
+          "0.2.6 beam could make one — now unlocks and crafts one machine from two restonia "
+          "crystals, two flint, two cobblestone, two basic coils and one iron casing, all nine "
+          "consumed; and the Atomic Reconstructor's own recipe unlocks and crafts one machine from "
+          "four iron ingots, four redstone (#c:dusts/redstone) and one iron casing, all nine "
+          "consumed, staying empty for gold ingots in the iron cells and glowstone dust in the "
+          "redstone cells")
     return 0
 
 

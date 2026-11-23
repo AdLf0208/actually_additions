@@ -1452,22 +1452,275 @@ match what the mod's own code says.
 > same gap silentgems measured), and the e2e asserts the gap. 130 entries, 121,206 B, sha256
 > `de43f029…62486`.
 
-## Next slice (0.2.6)
+## Slice 5 (0.2.6, 2026-11-23) — the Atomic Reconstructor and its laser conversion
 
-**Family:** the **Atomic Reconstructor and its laser conversion** — the artefact's real "make a
-crystal" mechanic — because it is the only remaining route to `restonia_crystal`, which the Crusher's
-recipe and `basic_coil` still wait on.
+**Family:** the **Atomic Reconstructor** — a facing block entity with a 300,000 CF buffer, a lens
+slot, a 100-tick cycle and a ten-block beam that converts the 3×3 plane it hits — plus the jar's
+block-reachable `laser/` recipes (`crystalize_restonia_crystal`, `soul_sand`, `nether_wart`), the
+`restonia_crystal` item, the `c:dusts/redstone` and `c:sands` tags and the machine's own crafting
+recipe. This is the 0.2.5 next-slice, whose precondition (an `iron_casing`, hence `black_quartz`)
+0.2.5 met.
 
-- **Gap line** (0.2.5's coverage table, and the 0.2.5 investigation's item 2): *"The Atomic
-  Reconstructor + the crystal conversion … its own recipe needs an `iron_casing`, so it is not
-  survival-reachable before black_quartz"* — that precondition is now met.
-- **Shape:** a block entity with a 1000 CF buffer (`insert Mth.ceil(power*0.016666F)` per tick), a
-  lens slot, a 100-tick cycle and a 10-block beam converting the first convertible block; the jar's
-  `laser/*` recipes; `iron_casing` + glass + redstone in its own recipe.
-- **In-game assertion that can fail:** place it facing a `#c:dusts/redstone` block, fill 1000 CF,
-  tick 100, assert a `restonia_crystal` drop and the dust gone; differential: the same shot at stone
-  emits nothing and spends the CF it charged.
-- **Out of scope:** the GUI (`blocked(no-single-player-mod-screen)`), the Empowerer and the empowered
-  crystals, the Double Crusher, the ore's generation (a pin gap, re-checked at every repin).
+- **Gap line** (`Next slice (0.2.6)`): *"the Atomic Reconstructor and its laser conversion — the
+  artefact's real 'make a crystal' mechanic — because it is the only remaining route to
+  `restonia_crystal`, which the Crusher's recipe and `basic_coil` still wait on"*.
+- **Why it fits `machines`:** a block entity, an energy capability, a container and a custom recipe
+  type — no GUI (still `blocked(no-single-player-mod-screen)`), no renderer, no new kind of hook.
+- **Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins `e59da909`.
+
+### The conversion rules as the artefact states them
+
+The brief's "1,000 CF buffer / charge 1,000 / tick 100" is the **shot**, not the buffer. Read from
+`TileEntityAtomicReconstructor`, `MethodHandler.invokeReconstructor` / `invokeConversionLens`,
+`LensConversion`, `LaserRecipe` and `CommonConfig` (upstream `cd9d9c6`):
+
+| Rule | Value | Source |
+|---|---|---|
+| buffer | `new CustomEnergyStorage(power, Mth.ceil(power·0.016666F), 0)`, `RECONSTRUCTOR_POWER` default **300 000**; insert **5 000** a call, extract 0 | `TileEntityAtomicReconstructor.java:50-55`, `CommonConfig.java:54` |
+| shot gate | `ENERGY_USE = **1 000**` CF, paid **before** the beam walks | `TileEntityAtomicReconstructor.java:43`, `MethodHandler.java:283-289` |
+| conversion cost | the recipe's own `energy` (40 for `#c:dusts/redstone`), paid **again** per converted block | `MethodHandler.java:231` |
+| cycle | `currentTime` 0 → 100, one decrement a tick, shot at 0: one attempt per **100** ticks; a starved attempt still waits the 100 | `TileEntityAtomicReconstructor.java:129-138` |
+| redstone | `isRedstonePowered` freezes the cycle (no decrement, no shot); `isPulseMode` is the mod's own mode | same |
+| lens | slot 0, an `ILensItem`; empty → `lensDefaultConversion` | `getLens` |
+| distance | the default conversion lens reaches **10** blocks | `LensConversion.getDistance` |
+| beam | `i` in 1..=10: convert the **3×3 plane** around `pos + facing·i` (range 1, zero on the facing axis), then stop if that block is not air (`invoke` returns `!isAir`), else continue | `MethodHandler.java:281-303`, `:177-275` |
+| which blocks convert | **every** non-air block of the plane, in `x` → `z` → `y` order, while the remaining CF covers its recipe (the `break` leaves only the innermost loop) | `MethodHandler.java:203-237` |
+| which recipe wins | the first recipe of the type whose ingredient matches the **block's item** (`new ItemStack(state.getBlock())`): `CONVERSION_LASER_RECIPES.stream().findFirst()`; the pin lists a type's recipes in file order | `LaserRecipe.java:94` |
+| result | a `BlockItem` result is **placed**; any other result is spawned as an item at the block's centre and the block becomes air | `MethodHandler.java:234-240` |
+| comparator | `clamp(energy / 20 000, 0, 15)` | `BlockAtomicReconstructor.getAnalogOutputSignal` |
+| saved state | `Energy` in the block save; `CurrentTime` is sync-only (a reload restarts the cycle) | `writeSyncableNBT` |
+
+Consequences the leg asserts: a shot at **1 040** CF (1 000 gate + 40 conversion) converts one
+redstone wire and leaves 0; at **1 039** it pays the gate (39 left) and converts nothing; at stone
+it pays 1 000, converts nothing and leaves 40; at **1 120** it converts *two* wires in the plane
+(40 left) and at 1 040 only the first; the beam converts a block **ten** away and not one eleven
+away.
+
+### What is carried, and why only three `laser/` files
+
+The jar has 22 `laser/` recipes. Only three can fire through the **block** half of the beam with
+this package: `crystalize_restonia_crystal` (`#c:dusts/redstone` → the crystal, 40), `soul_sand`
+(`#c:sands` → soul sand, 20 000) and `nether_wart` (`minecraft:red_mushroom` → nether wart,
+150 000). The others name items or blocks this package does not ship (the other crystals, the
+lenses, the relays, the ethetic blocks) or turn an **item** into an item (`leather ← rotten flesh`,
+`prismarine_shard ← quartz`), which is the beam's item-entity half — a next slice, not this one
+(the pin *can* enumerate entities, `LevelRef::entities_in`).
+
+Both carried vanilla results are `BlockItem`s, so upstream's block branch **places** them: the sand
+becomes soul sand in place, and the red mushroom becomes a `minecraft:nether_wart[age=0]` crop (the
+leg gives that cell soul sand below, or the crop would pop and drop).
+
+### TDD
+
+Two reds, each quoted.
+
+1. **The pure rules** (`src/runtime.rs`, tests first):
+   `evidence/actuallyadditions/sdk-test-red-laser.log`, `cargo test --offline` exit 101:
+
+   ```text
+   error[E0422]: cannot find struct, variant or union type `Reconstructor` in this scope
+      --> src/runtime.rs:405:33
+   error[E0425]: cannot find value `RECONSTRUCTOR_TICKS` in this scope
+      --> src/runtime.rs:439:41
+   ```
+
+   Green: **47 tests** (20 runtime, 8 reconstructor, 19 glue), including
+   `the_shot_costs_a_thousand_and_the_recipe_its_own`, `the_cycle_is_about_a_hundred_ticks`,
+   `redstone_freezes_the_cycle`, `the_comparator_steps_every_twenty_thousand`,
+   `the_plane_is_three_by_three_across_the_beam`,
+   `a_placed_reconstructor_faces_away_from_the_player`, `a_laser_recipe_is_read_from_the_jars_json`
+   and `a_restored_reconstructor_is_clamped_into_its_buffer_and_cycle`.
+2. **The carried recipes resolve** (`tools/check_recipe_keys.py`, which now also reads
+   `recipe/laser/*.json` and checks each result id): red against the tree with the old blocker still
+   in place (`evidence/actuallyadditions/check-recipe-keys-red-0.2.6.log`, exit 1):
+
+   ```text
+   FAIL     actuallyadditions:crusher: blocked(restonia_crystal_source) is stale — the recipe resolves now; remove the blocker and prove it in game
+   6 recipe(s), 9 craftable, 1 blocked, 1 failure(s)
+   exit=1
+   ```
+
+   Green (`check-recipe-keys.log`): `6 recipe(s), 9 craftable, 0 blocked, 0 failure(s)`, with the
+   three laser recipes `ok … every ingredient and its result resolve (laser)`.
+
+### In-game transcript (`evidence/actuallyadditions-e2e/e2e-launcher.log`, 0.2.6)
+
+```
+  placed at 2,100,14 from the north looking south: actuallyadditions:atomic_reconstructor[facing=north]
+  Atomic Reconstructor at 2,100,14: 0/300000 CF (comparator 0, facing north, cycle 92/100, lens default, sight nothing, t=4080)
+  generator-charged: Atomic Reconstructor at 0,100,16: 540/300000 CF (comparator 0, facing east, … t=4145)
+  block(3,100,18) = minecraft:redstone_wire[east=none,north=none,power=0,south=none,west=none]
+  charged actuallyadditions:atomic_reconstructor at 2,100,18: 0 -> 1040 CF (inserted 1040)
+  charged: Atomic Reconstructor at 2,100,18: 1040/300000 CF (… sight minecraft:redstone_wire -> actuallyadditions:restonia_crystal @ 40 CF, t=4174)
+  block(3,100,18) = air
+  restonia crystals on the ground: 1
+  after the shot: Atomic Reconstructor at 2,100,18: 0/300000 CF (… t=4303)
+  stone: Atomic Reconstructor at 6,100,18: 1040/300000 CF (… sight minecraft:stone -> nothing, t=4328)
+  block(7,100,18) = minecraft:stone
+  after the shot: Atomic Reconstructor at 6,100,18: 40/300000 CF (…)
+  1,039 CF after the shot: Atomic Reconstructor at 10,100,18: 39/300000 CF (… sight minecraft:redstone_wire -> … @ 40 CF)
+  block(10,100,22) = air
+  a block ten away in the beam converted
+  block(11,100,23) = minecraft:redstone_wire[…]
+  eleven away, after the shot: Atomic Reconstructor at 0,100,23: 40/300000 CF (…)
+  block(15,100,13) = air
+  block(15,100,15) = air
+  both plane blocks converted: 2 crystal(s)
+  block(15,100,13) = air
+  block(15,100,15) = minecraft:redstone_wire[…]
+  cycle without redstone: 93 -> 66
+  cycle beside a redstone block: 58 -> 58
+  cycle after the redstone was removed: 58 -> 29
+  before the break: Atomic Reconstructor at 22,100,14: 5000/300000 CF (…)
+  break: {"drops":{"actuallyadditions:atomic_reconstructor":1},"picked_up":{},"items_left_on_ground":1}
+  the drop's Item tag: {… "minecraft:block_entity_data": {id: "actuallyadditions:atomic_reconstructor_block_entity", energy: 5000} …}
+  payload: 5000 CF
+  placed again: Atomic Reconstructor at 20,100,14: 5000/300000 CF (…)
+  sand: minecraft:sand -> minecraft:soul_sand @ 20000 CF
+  block(3,100,10) = minecraft:soul_sand
+  block(7,100,10) = minecraft:red_mushroom
+  red mushroom: minecraft:red_mushroom -> minecraft:nether_wart @ 150000 CF
+  block(7,100,10) = minecraft:nether_wart[age=0]
+```
+
+The crafting leg (`tools/craft_check.py`, same run) records the chain closing:
+
+```
+  recipe give actuallyadditions:atomic_reconstructor -> {"chat": ["Unlocked 1 recipe(s) …"], "ok": true}
+  give actuallyadditions:restonia_crystal -> {"given": 1, "ok": true}
+  atomic reconstructor (4 iron ingots + 4 redstone + 1 iron casing): result {"count": 1, "item": "actuallyadditions:atomic_reconstructor", "slot": 200}
+  atomic reconstructor …: inventory after the craft {"minecraft:iron_ingot": 2, "minecraft:redstone": 2, "actuallyadditions:iron_casing": 1, "actuallyadditions:atomic_reconstructor": 1}
+  control: gold ingots where #c:ingots/iron goes (not a member): result null
+  control: glowstone dust where #c:dusts/redstone goes (not a member): result null
+  crusher (2 restonia + 2 flint + 2 cobblestone + 2 coils + 1 casing): result {"count": 1, "item": "actuallyadditions:crusher", "slot": 200}
+  crusher …: inventory after the craft {"actuallyadditions:restonia_crystal": 2, "minecraft:flint": 2, "minecraft:cobblestone": 2, "actuallyadditions:basic_coil": 2, "actuallyadditions:iron_casing": 1, "actuallyadditions:crusher": 1}
+```
+
+### Ladder (0.2.6, slot `W1121-aa`, `CARGO_INCREMENTAL=0`, `BUILD_LOCAL=1`)
+
+| Step | Result |
+|---|---|
+| tests | **47 passed** (20 runtime, 8 reconstructor, 19 glue), `Compiling actuallyadditions v0.2.6` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings`, exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check`, exit 0 — `sdk-fmt.log` |
+| package ×2 | `cargo horizon-mod build`, twice, **lock kept** — **140,841 B** both, `cmp` identical, sha256 `414c0ab9…d52b`, **150 entries** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `actuallyadditions 0.2.6 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` → **1/1** |
+| in-game | `tools/e2e.sh` (`--offscreen`, the launcher build of this package) → `PASS` + `EXIT:0` — `e2e-launcher.log` |
+| counterfactual | `SELFTEST=laser` → `FAIL: SELFTEST laser: the beam made a crystal (the real assertion); …` + `EXIT:1` — `e2e-launcher-selftest-laser.log` |
+| counterfactual | `SELFTEST=1` → `FAIL: SELFTEST flipped: the placed machine kept 2520 FE, not 0` + `EXIT:1` |
+| counterfactual | `SELFTEST=ore` → `FAIL: SELFTEST ore: …` + `EXIT:1` |
+| counterfactual | `NEGATIVE=1` → `FAIL: NEGATIVE: the Coal Generator's recipe unlocked …` + `EXIT:1` |
+| control | `GAME=$CONTROL_GAME` (the same Nightly, no package) → `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` → `logs=6 ok=6` |
+
+Artifact: `actuallyadditions.hmod`, **140,841 B**, sha256
+`414c0ab9ad5da8795420261ecd04720d5cc030c76d001832d395d2c34693d52b`, **150 entries** (0.2.5: 130),
+`Cargo.lock` **packed** (8,850 B; its own version line moved to 0.2.6). The launcher build is
+`native-0a875da-226ec8d9c3ec` (its `native-mods.json` names `actuallyadditions 0.2.6`) and the leg's
+first line names the sha above, so the game ran the delivered archive.
+
+### Coverage (slice 5)
+
+| Family | State |
+|---|---|
+| the reconstructor block (placement, state, drop) | **tested** — `ctl place` from a known yaw gives `facing=north` (upstream's `getNearestLookingDirection().getOpposite()`); `setblock` reads back each facing; a survival break drops the machine itself |
+| its 300,000 CF buffer + the energy push | **tested** — a coal generator beside it charges it (`0 → 540 CF` and climbing); the buffer is a real block energy capability (the harness charger fills it through it) |
+| the 100-tick cycle and the redstone stop | **tested** — `cycle 92 → 65` unpowered, `59 → 59` beside a redstone block, `59 → 32` after removing it |
+| a 1,000 CF shot + the recipe's own energy | **tested** — 1,040 converts and leaves 0; 1,039 leaves 39 and converts nothing; stone leaves 40 |
+| the 10-block beam | **tested** — a wire ten away converts, one eleven away stays |
+| the 3×3 plane, in order | **tested** — two wires both convert at 1,120 (40 left), only the first at 1,040 |
+| the result rule (block placed, item dropped) | **tested** — the crystal is an item drop (`restonia crystals on the ground: 1`); soul sand and nether wart are placed (`soul_sand`, `nether_wart[age=0]`) |
+| `laser/crystalize_restonia_crystal` (40) | **tested** — the shot above, plus the readout's `sight … -> …restonia_crystal @ 40 CF` |
+| `laser/soul_sand` (20,000) | **tested** — a sand block becomes soul sand, the buffer empties |
+| `laser/nether_wart` (150,000) | **tested** — a red mushroom becomes a nether wart crop, the buffer empties |
+| the machine's own recipe (`IRI / RCR / IRI`) | **tested** — crafts one from 4 `#c:ingots/iron`, 4 `#c:dusts/redstone` and a casing, all nine consumed; gold ingots and glowstone dust in those cells stay empty |
+| `c:dusts/redstone`, `c:sands` | **tested via their consumers** — the reconstructor's recipe and the soul-sand conversion use them; a non-member (glowstone dust) fails the craft |
+| `restonia_crystal` item | **tested** — give-able, dropped by the beam, and the Crusher's recipe's last key |
+| the Crusher's recipe (chain closed) | **tested** — crafts one machine from 2 crystals + 2 flint + 2 cobblestone + 2 coils + 1 casing, all consumed |
+| break keeps the buffer | **tested** — the drop's payload is `{id, energy: 5000}`, placing it again reads 5,000 |
+| the lens slot | **not ported** — no item in this package is an `ILensItem` (1.3.26's only lens source is the reconstructor's own four-recipe lens cycle, which needs a lens to start); the slot is declared, nothing can fill it, and the click refuses every item |
+| the beam's item-entity half | **not ported (next slice)** — upstream also converts dropped items in the box between the machine and the hit block; the pin can enumerate them (`LevelRef::entities_in`), but this slice is the block half |
+| comparator output | **not ported** — the strength is computed and printed; no `has_analog_output` hook is declared |
+| the beam's visual + the block-break level event | **not ported** — no packet, no `levelEvent(2001)`; the conversion is state-only |
+| the `reset/` recipe type and pulse mode | **not carried** — AA's own `actuallyadditions:reset` recipe type and the pulse-mode component are another slice (a wrench/redstone-control family) |
+
+### Deviations and gaps this slice adds
+
+1. **The cycle is persisted; upstream's is sync-only.** `currentTime` rides the block entity's saved
+   compound, so a reload resumes the cycle where upstream restarts it at 0. A 100-tick timer; the
+   item payload still carries the buffer only (upstream's loot copies the energy component).
+2. **No pulse mode, no wrench, no side configuration.** A redstone signal freezes the cycle (as
+   upstream), but the mod's own pulse mode and its `tryToggleRedstone` click are not ported.
+3. **The lens slot is inert** (see coverage): nothing in the package is a lens.
+4. **The beam converts blocks only** (the item half is the next slice).
+5. **The comparator is printed, not wired** (same gap as the other two machines).
+6. **The `c:` tag members are NeoForge 1.21.x's lists**, as for the earlier tags: `c:dusts/redstone`
+   = `minecraft:redstone`; `c:sands` = sand, red sand, suspicious sand.
+7. **`/actuallyadditions charge <pos> <amount>` is a harness addition** (the same shape as
+   `/refinedstorage charge`): it brings a machine's buffer to `amount` through its energy
+   capability, because a single-player world has no charger and a generator moves only 80 FE a tick.
+   Level 2, like the readout.
+
+### Harness facts measured while getting there
+
+1. **`give` lands on the next tick.** `ctl command "give …"` followed immediately by `ctl select
+   <item>` answers `no <item> in the inventory`; four ticks between them fixes it (this cost the
+   first 0.2.6 run, at the silk-touch leg).
+2. **An assignment from a `grep` that finds nothing is fatal under `set -euo pipefail`.** A helper
+   that looks for an earlier chat reply must end `|| true`.
+3. **A laser result that is a `BlockItem` is placed, not dropped** — `minecraft:soul_sand` and
+   `minecraft:nether_wart` both are, and a nether wart crop needs soul sand below or it pops.
+4. **`redstone_wire` is the block whose item is `minecraft:redstone`** — that is what makes
+   `#c:dusts/redstone` convertible at all (`new ItemStack(state.getBlock())`).
+5. **The `e2e` instance's recorded version had been pruned** (`native-0a875da-8a31482892f4` was gone),
+   so `launcher native-build` died at "Installing the build" with `os error 2`. A dedicated instance
+   (`HORIZON_E2E_INSTANCE=actuallyadditions-e2e`) builds and installs cleanly.
+
+The two throwaway probes behind facts 1 and 3 are kept as evidence
+(`ports/_shared/evidence/actuallyadditions/probe-ctl-exit.sh`, `probe-give-select.sh`): they launch the
+package's game on a scratch home and print each `ctl` call's exit code and reply.
+
+### Upstream defects fixed
+
+None found in this slice: the cycle, the gate, the conversion and the plane order are what the code
+says they are. The brief's "1,000 CF buffer" was a misreading of `ENERGY_USE`, recorded above.
+
+**Changelog (0.2.6):**
+
+> **0.2.6 — the Atomic Reconstructor and its laser conversion.** Adds the facing machine (the jar's
+> blockstate, model, texture, loot table and `IRI/RCR/IRI` recipe), a 300,000 CF buffer (5,000 a
+> call in, nothing out), a 100-tick cycle a redstone signal freezes, and a ten-block beam that pays
+> 1,000 CF per shot plus the converting recipe's own energy and converts the 3×3 plane it hits,
+> placing a block result or dropping an item one. Three of the jar's `laser/` recipes can fire
+> through that block half and ship: `#c:dusts/redstone` → Restonia Crystal (40 CF), `#c:sands` → soul
+> sand (20,000) and red mushroom → nether wart (150,000), with the `c:dusts/redstone` and `c:sands`
+> tags. The crystal closes the chain: the Crusher's own recipe now crafts, and
+> `tools/recipe-blockers.json` is empty. A `/actuallyadditions info` line reads the buffer, facing,
+> cycle and the block the beam sights; a `/actuallyadditions charge <pos> <amount>` harness command
+> brings a buffer to a level through its energy capability. 150 entries, 140,841 B, sha256
+> `414c0ab9…d52b`.
+
+## Next slice (0.2.7)
+
+**Family:** the **beam's item-entity half** — the other thing `invokeConversionLens` converts — plus
+the two `laser/` recipes that can only work on items (`minecraft:rotten_flesh` → leather 20,000,
+`minecraft:quartz` → prismarine shard 30,000).
+
+- **Gap line** (this slice's coverage table): *"the beam's item-entity half — not ported (next
+  slice): upstream also converts dropped items in the box between the machine and the hit block; the
+  pin can enumerate them (`LevelRef::entities_in`)"*.
+- **Shape:** no new block or item; `LevelRef::entities_in` over upstream's AABB (`tile.pos` to
+  `hitBlock + 1`, expanded along the facing), `host.item_entity` to read a dropped stack, the same
+  `find_laser_recipe`, `item_entity_set_stack` (or a discard + `spawn_item`) to replace it, and
+  upstream's `aa_cnv` marker so a converted item is not converted again.
+- **In-game assertion that can fail:** drop a redstone *item* (not a wire block) in the beam,
+  charge 1,040, tick 100, assert the item entity becomes a `restonia_crystal` and the count is
+  conserved; differential: the same item outside the box stays redstone.
+- **Out of scope:** the GUI, the Empowerer, the Double Crusher, lens items, the ore's generation
+  (`blocked(configured-feature-not-registered)`), pulse mode/wrench.
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
