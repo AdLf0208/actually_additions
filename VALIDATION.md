@@ -1,5 +1,45 @@
 # Validation
 
+**0.2.9 (2026-11-23, pin `0a875da`)** — packaging: the **registry's R9**. The automated check at
+`495701cf` refused 0.2.8 (*"refused rules R9"*), because `Cargo.toml` declared
+`serde_json = "=1.0.151"` and the package packed the lock that dependency forces; the registry
+refuses any dependency but the SDK path dep, so a package with a registry dependency cannot be
+published at all. The dependency is removed and `src/runtime.rs` reads the recipe JSON with its own
+reader (`Json`: parse, `Display`, the accessors serde_json's `as_i64`/`as_f64` had), which is the
+path the world's data packs feed — a table resolved at build time would freeze what a pack can
+override. No family changed. The reversal of this campaign's old "pack the lock" rule, the choice
+and the traps are in `notes.md` → "Slice 8" and "The registry `Cargo.lock` now ships — and 0.2.9
+reverses it".
+
+| Check | Command | Result |
+|---|---|---|
+| rules (red) | `cargo test --offline`, `Json::parse` at `todo!()` | **12 failed / 47 passed**, every failure the reader's own `not yet implemented` panic — `evidence/actuallyadditions/sdk-test-red-json.log` |
+| tests | `cargo test --offline` after `cargo clean -p actuallyadditions` | **59 passed / 0 failed** (19 runtime, 4 json, 17 reconstructor, 19 glue), `Compiling actuallyadditions v0.2.9` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` | `6 recipe(s), 11 craftable, 0 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **151,085 B** both, `cmp` identical, sha256 `964b0a83c110f3eabb00a763b338246dc7860eb241c2727705a94bcf8ccd9911`, **151 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.txt` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.9 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 151085 bytes, EXIT 0 — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` (the first attempt, with the local type named `Reader`, answered `does not fit — the type wire::Reader can no longer be built with a literal`; the name collided with the SDK's own surface, see `notes.md` trap 1) |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1**, R9 rows included (tables, SDK-only dependency, no build script, `[lib]` is `src/lib.rs`, no packed lock) |
+| launcher build | `ports/tools/launcher-game.sh build actuallyadditions --rebuild` | `native-0a875da-90007b61b7ec`, `Compiling actuallyadditions (1 of 1)`, `native-mods.json` names `actuallyadditions 0.2.9` — `evidence/actuallyadditions/launcher-build.log` |
+| in-game | `tools/e2e.sh` on the launcher build of this package | `PASS` + `EXIT:0` — `evidence/actuallyadditions-e2e/e2e-launcher.log` |
+| counterfactual | `NEGATIVE=1` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour), …` + `EXIT:1` — `e2e-launcher-negative.log` |
+| counterfactual | `SELFTEST=1` | `FAIL: SELFTEST flipped: the placed machine kept 2500 FE, not 0` + `EXIT:1` — `e2e-launcher-selftest.log` |
+| counterfactual | `SELFTEST=drops` | `FAIL: SELFTEST drops: the payload carries no Items (the fixed behaviour); …` + `EXIT:1` — `e2e-launcher-selftest-drops.log` |
+| counterfactual | `SELFTEST=ore` | `FAIL: SELFTEST ore: the ore dropped Black Quartz (the real assertion); …` + `EXIT:1` — `e2e-launcher-selftest-ore.log` |
+| counterfactual | `SELFTEST=laser` | `FAIL: SELFTEST laser: the beam made a crystal (the real assertion); …` + `EXIT:1` — `e2e-launcher-selftest-laser.log` |
+| counterfactual | `SELFTEST=item` | `FAIL: SELFTEST item: the beam converted the dropped item (the real assertion); …` + `EXIT:1` — `e2e-launcher-selftest-item.log` |
+| counterfactual | `SELFTEST=pulse` | `FAIL: SELFTEST pulse: the rising edge fired a shot (the real assertion); …` + `EXIT:1` — `e2e-launcher-selftest-pulse.log` |
+| control | `CONTROL=1` (the same Nightly, no package) | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `python3 ports/tools/check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=9 ok=9` |
+
+Every log prints the package's sha256 and size it was run against. The 0.2.9 scripts are
+`evidence/actuallyadditions/{ladder,build,check}-0.2.9.sh` and
+`evidence/actuallyadditions-e2e/run-leg-0.2.9.sh`; the 0.2.8 logs they replace stay in place as the
+record of that version.
+
 **0.2.8 (2026-11-23, pin `0a875da`)** — slice 7: the Atomic Reconstructor's **redstone mode** and the
 **conversion's order**. `isPulseMode` is upstream's second mode: `serverTick` runs the 100-tick cycle only
 under `!isRedstonePowered && !isPulseMode`, and a rising edge of `getBestNeighborSignal` fires one whole

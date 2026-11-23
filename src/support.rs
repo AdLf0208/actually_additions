@@ -25,9 +25,9 @@ use crate::runtime::{
     Crusher, CrushingRecipe, GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, LaserRecipe,
     RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_LENS_DISTANCE, RECONSTRUCTOR_MAX_INSERT,
     RECONSTRUCTOR_TICKS, Reconstructor, Signal, Step, bonus_for, can_crush, clamp_energy,
-    comparator_strength, conversion_plane, convert, facing_for_placement, ingredient_json, is_fuel,
-    item_scan_box, items_possible, may_convert, reconstructor_comparator, restored_crusher,
-    restored_generator, restored_reconstructor,
+    comparator_strength, conversion_plane, convert, facing_for_placement, is_fuel, item_scan_box,
+    items_possible, may_convert, reconstructor_comparator, restored_crusher, restored_generator,
+    restored_reconstructor,
 };
 
 /// The generator block; its block entity type carries the same path.
@@ -430,25 +430,17 @@ pub(crate) fn find_recipe(host: &dyn Host, input: &ItemStack) -> Option<Crushing
     if cache.is_none() || due {
         let mut resolved = Vec::new();
         for recipe in host.recipes_of_type(CRUSHING).iter() {
-            // The recipe's JSON is the SDK's own `serde_json`, which the launcher compiles
-            // separately from this package's crate: it is read through its text so the pure
-            // module parses this package's `serde_json::Value`, not a distinct type with the
-            // same name.
+            // The file is the data pack's own JSON. The pure module reads it with its own
+            // dependency-free reader (the registry refuses a package with a crate dependency),
+            // so the host's value is only ever printed to text here.
             let text = recipe.json.to_string();
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-                continue;
-            };
             let Ok(parsed) = CrushingRecipe::parse(&recipe.id, &text) else {
                 continue;
             };
-            let ingredient = value
-                .get("ingredient")
-                .map(ingredient_json)
-                .and_then(|ingredient| {
-                    host.recipe_ingredient(&ingredient.to_string())
-                        .ok()
-                        .flatten()
-                });
+            let ingredient = host
+                .recipe_ingredient(&parsed.ingredient.to_string())
+                .ok()
+                .flatten();
             if let Some(ingredient) = ingredient {
                 resolved.push(Resolved {
                     ingredient,
@@ -493,20 +485,13 @@ pub(crate) fn find_laser_recipe(host: &dyn Host, input: &ItemStack) -> Option<La
         let mut resolved = Vec::new();
         for recipe in host.recipes_of_type(LASER).iter() {
             let text = recipe.json.to_string();
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-                continue;
-            };
             let Ok(parsed) = LaserRecipe::parse(&recipe.id, &text) else {
                 continue;
             };
-            let ingredient = value
-                .get("ingredient")
-                .map(ingredient_json)
-                .and_then(|ingredient| {
-                    host.recipe_ingredient(&ingredient.to_string())
-                        .ok()
-                        .flatten()
-                });
+            let ingredient = host
+                .recipe_ingredient(&parsed.ingredient.to_string())
+                .ok()
+                .flatten();
             if let Some(ingredient) = ingredient {
                 resolved.push(ResolvedLaser {
                     ingredient,

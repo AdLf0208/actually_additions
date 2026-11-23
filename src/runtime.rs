@@ -6,8 +6,6 @@
 // glue in `support.rs` converts block entities, item stacks and the engine's
 // fuel values into the small values used here.
 
-use serde_json::Value;
-
 /// Upstream `CustomEnergyStorage(60000, 0, 80)`.
 pub const GENERATOR_CAPACITY: i32 = 60_000;
 /// The most one extract call/side moves (upstream `maxExtract`).
@@ -22,6 +20,419 @@ pub const CRUSHER_MAX_INSERT: i32 = 100;
 pub const CRUSHER_ENERGY_PER_TICK: i32 = 40;
 /// Upstream `getMaxCrushTime()` for the single Crusher.
 pub const CRUSHER_TICKS: u32 = 100;
+
+// ---------------------------------------------------------------------------
+// The JSON reader the recipe files need
+// ---------------------------------------------------------------------------
+
+/// A JSON value, read here rather than by a crate: the recipe files are the only JSON this
+/// package handles, and the registry refuses a package that declares a registry dependency
+/// (rule R9 of its `tools/native-subset` checks), so the reader lives in this file.
+///
+/// A number keeps the digits it was written with, so a `count` stays an integer and a `chance`
+/// keeps its exact text; the value is otherwise the usual tree. Key order is file order and a
+/// repeated key is kept twice (the first one wins in [`Json::get`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    /// The literal as written: `3`, `-1`, `0.5`, `1e2`.
+    Number(String),
+    String(String),
+    Array(Vec<Json>),
+    Object(Vec<(String, Json)>),
+}
+
+impl Json {
+    /// Read one JSON document; `None` for anything malformed.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut reader = JsonReader {
+            bytes: text.as_bytes(),
+            at: 0,
+        };
+        let value = reader.value(0)?;
+        reader.skip_whitespace();
+        (reader.at == reader.bytes.len()).then_some(value)
+    }
+
+    /// The value under `key`, when this is an object that carries it.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&Self> {
+        match self {
+            Json::Object(entries) => entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value),
+            _ => None,
+        }
+    }
+
+    /// The text, when this is a string.
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Json::String(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// The entries, when this is an array.
+    #[must_use]
+    pub fn as_array(&self) -> Option<&[Self]> {
+        match self {
+            Json::Array(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    /// The number as an integer, when it is written as one (serde_json's `as_i64`).
+    #[must_use]
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Json::Number(text) => text.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// The number as a float, when it is a number (serde_json's `as_f64`).
+    #[must_use]
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Json::Number(text) => text.parse().ok(),
+            _ => None,
+        }
+    }
+
+    fn write(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
+        match self {
+            Json::Null => out.write_str("null"),
+            Json::Bool(true) => out.write_str("true"),
+            Json::Bool(false) => out.write_str("false"),
+            Json::Number(text) => out.write_str(text),
+            Json::String(text) => write_string(out, text),
+            Json::Array(items) => {
+                out.write_char('[')?;
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        out.write_char(',')?;
+                    }
+                    item.write(out)?;
+                }
+                out.write_char(']')
+            }
+            Json::Object(entries) => {
+                out.write_char('{')?;
+                for (index, (key, value)) in entries.iter().enumerate() {
+                    if index > 0 {
+                        out.write_char(',')?;
+                    }
+                    write_string(out, key)?;
+                    out.write_char(':')?;
+                    value.write(out)?;
+                }
+                out.write_char('}')
+            }
+        }
+    }
+}
+
+/// A JSON value prints as the compact document it was read from (serde_json's `Display`).
+impl std::fmt::Display for Json {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.write(f)
+    }
+}
+
+/// The deepest nesting [`Json::parse`] accepts: serde_json's own default, and far more than a
+/// recipe nested through `components` uses.
+const JSON_DEPTH: u32 = 128;
+
+/// One string's JSON form: the two mandatory escapes, the short control escapes, and `\u00XX`
+/// for the rest.
+fn write_string(out: &mut dyn std::fmt::Write, text: &str) -> std::fmt::Result {
+    out.write_char('"')?;
+    for character in text.chars() {
+        match character {
+            '"' => out.write_str("\\\"")?,
+            '\\' => out.write_str("\\\\")?,
+            '\n' => out.write_str("\\n")?,
+            '\r' => out.write_str("\\r")?,
+            '\t' => out.write_str("\\t")?,
+            control if (control as u32) < 0x20 => write!(out, "\\u{:04x}", control as u32)?,
+            other => out.write_char(other)?,
+        }
+    }
+    out.write_char('"')
+}
+
+/// A byte cursor over one document. JSON's structure is ASCII, so a byte scan is enough; a
+/// multi-byte character inside a string is copied whole.
+struct JsonReader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl JsonReader<'_> {
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.at).copied()
+    }
+
+    fn bump(&mut self) -> Option<u8> {
+        let byte = self.peek()?;
+        self.at += 1;
+        Some(byte)
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.at += 1;
+        }
+    }
+
+    fn value(&mut self, depth: u32) -> Option<Json> {
+        if depth > JSON_DEPTH {
+            return None;
+        }
+        self.skip_whitespace();
+        match self.peek()? {
+            b'{' => self.object(depth),
+            b'[' => self.array(depth),
+            b'"' => self.string().map(Json::String),
+            b't' => self.literal("true", Json::Bool(true)),
+            b'f' => self.literal("false", Json::Bool(false)),
+            b'n' => self.literal("null", Json::Null),
+            b'-' | b'0'..=b'9' => self.number(),
+            _ => None,
+        }
+    }
+
+    fn literal(&mut self, word: &str, value: Json) -> Option<Json> {
+        let end = self.at.checked_add(word.len())?;
+        if self.bytes.get(self.at..end)? == word.as_bytes() {
+            self.at = end;
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    /// A number keeps its source text; the scan takes every character a number may hold and
+    /// `f64::parse` (which Rust writes to the JSON grammar) rejects a token that is not one.
+    fn number(&mut self) -> Option<Json> {
+        let start = self.at;
+        while matches!(
+            self.peek(),
+            Some(b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+        ) {
+            self.at += 1;
+        }
+        let text = std::str::from_utf8(self.bytes.get(start..self.at)?).ok()?;
+        text.parse::<f64>().ok()?;
+        Some(Json::Number(text.to_owned()))
+    }
+
+    fn string(&mut self) -> Option<String> {
+        self.bump().filter(|byte| *byte == b'"')?;
+        let mut out = String::new();
+        loop {
+            match self.bump()? {
+                b'"' => return Some(out),
+                b'\\' => self.escape(&mut out)?,
+                0x00..=0x1f => return None,
+                byte => self.push_byte(byte, &mut out)?,
+            }
+        }
+    }
+
+    /// One byte of a string body: ASCII as itself, a multi-byte sequence copied whole.
+    fn push_byte(&mut self, byte: u8, out: &mut String) -> Option<()> {
+        if byte < 0x80 {
+            out.push(char::from(byte));
+            return Some(());
+        }
+        let width = match byte {
+            0xc0..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf7 => 4,
+            _ => return None,
+        };
+        let start = self.at - 1;
+        let end = start.checked_add(width)?;
+        out.push_str(std::str::from_utf8(self.bytes.get(start..end)?).ok()?);
+        self.at = end;
+        Some(())
+    }
+
+    fn escape(&mut self, out: &mut String) -> Option<()> {
+        match self.bump()? {
+            b'"' => out.push('"'),
+            b'\\' => out.push('\\'),
+            b'/' => out.push('/'),
+            b'b' => out.push('\u{8}'),
+            b'f' => out.push('\u{c}'),
+            b'n' => out.push('\n'),
+            b'r' => out.push('\r'),
+            b't' => out.push('\t'),
+            b'u' => {
+                let first = self.hex4()?;
+                let scalar = if (0xd800..=0xdbff).contains(&first) {
+                    if self.bump()? != b'\\' || self.bump()? != b'u' {
+                        return None;
+                    }
+                    let second = self.hex4()?;
+                    if !(0xdc00..=0xdfff).contains(&second) {
+                        return None;
+                    }
+                    0x1_0000 + ((u32::from(first) - 0xd800) << 10) + (u32::from(second) - 0xdc00)
+                } else if (0xdc00..=0xdfff).contains(&first) {
+                    return None;
+                } else {
+                    u32::from(first)
+                };
+                out.push(char::from_u32(scalar)?);
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    fn hex4(&mut self) -> Option<u16> {
+        let mut value = 0u16;
+        for _ in 0..4 {
+            let nibble = match self.bump()? {
+                digit @ b'0'..=b'9' => digit - b'0',
+                digit @ b'a'..=b'f' => digit - b'a' + 10,
+                digit @ b'A'..=b'F' => digit - b'A' + 10,
+                _ => return None,
+            };
+            value = value * 16 + u16::from(nibble);
+        }
+        Some(value)
+    }
+
+    fn array(&mut self, depth: u32) -> Option<Json> {
+        self.at += 1; // '['
+        let mut items = Vec::new();
+        self.skip_whitespace();
+        if self.peek() == Some(b']') {
+            self.at += 1;
+            return Some(Json::Array(items));
+        }
+        loop {
+            items.push(self.value(depth + 1)?);
+            self.skip_whitespace();
+            match self.bump()? {
+                b',' => self.skip_whitespace(),
+                b']' => return Some(Json::Array(items)),
+                _ => return None,
+            }
+        }
+    }
+
+    fn object(&mut self, depth: u32) -> Option<Json> {
+        self.at += 1; // '{'
+        let mut entries = Vec::new();
+        self.skip_whitespace();
+        if self.peek() == Some(b'}') {
+            self.at += 1;
+            return Some(Json::Object(entries));
+        }
+        loop {
+            self.skip_whitespace();
+            let key = self.string()?;
+            self.skip_whitespace();
+            if self.bump()? != b':' {
+                return None;
+            }
+            entries.push((key, self.value(depth + 1)?));
+            self.skip_whitespace();
+            match self.bump()? {
+                b',' => {}
+                b'}' => return Some(Json::Object(entries)),
+                _ => return None,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+
+    #[test]
+    fn a_number_keeps_the_digits_it_was_written_with() {
+        let value =
+            Json::parse(r#"{"count": 3, "chance": 0.5, "scaled": 1e2}"#).expect("valid JSON");
+        assert_eq!(value.get("count").and_then(Json::as_i64), Some(3));
+        assert_eq!(
+            value.get("count").and_then(Json::as_f64),
+            Some(3.0),
+            "an integer is also a float"
+        );
+        assert_eq!(value.get("chance").and_then(Json::as_f64), Some(0.5));
+        assert_eq!(value.get("scaled").and_then(Json::as_f64), Some(100.0));
+        assert_eq!(
+            value.get("chance").and_then(Json::as_i64),
+            None,
+            "0.5 is not an integer, as serde_json's as_i64 has it"
+        );
+        assert_eq!(
+            value.to_string(),
+            r#"{"count":3,"chance":0.5,"scaled":1e2}"#,
+            "the digits survive the round trip"
+        );
+    }
+
+    #[test]
+    fn a_string_reads_escapes_and_unicode_pairs() {
+        let value = Json::parse(r#""a\"b\\c\u00e9\ud83d\ude00\n""#).expect("valid JSON");
+        assert_eq!(value.as_str(), Some("a\"b\\cé😀\n"));
+        assert_eq!(
+            Json::parse(&value.to_string()),
+            Some(value),
+            "the text it writes reads back as the same value"
+        );
+    }
+
+    #[test]
+    fn a_broken_document_is_refused() {
+        for text in [
+            "",
+            "{",
+            "[1,]",
+            r#"{"a":}"#,
+            "tru",
+            r#"{"a":1} x"#,
+            r#""\ud800""#,
+            "{'a':1}",
+            "[1 2]",
+        ] {
+            assert_eq!(Json::parse(text), None, "{text:?} is not JSON");
+        }
+    }
+
+    #[test]
+    fn a_recipe_ingredient_becomes_the_pins_form() {
+        let spec = |text: &str| ingredient_json(&Json::parse(text).expect("valid JSON"));
+        assert_eq!(
+            spec(r#"{"item": "minecraft:coal_ore"}"#),
+            Json::String("minecraft:coal_ore".into())
+        );
+        assert_eq!(spec(r#"{"tag": "c:ores"}"#), Json::String("#c:ores".into()));
+        assert_eq!(
+            spec(r#"[{"item": "minecraft:gravel"}, {"tag": "minecraft:coals"}]"#),
+            Json::Array(vec![
+                Json::String("minecraft:gravel".into()),
+                Json::String("#minecraft:coals".into())
+            ])
+        );
+        assert_eq!(
+            spec(r#""minecraft:stone""#),
+            Json::String("minecraft:stone".into())
+        );
+    }
+}
 
 /// Energy clamped into a buffer.
 #[must_use]
@@ -105,6 +516,9 @@ pub struct CrushResult {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CrushingRecipe {
     pub id: String,
+    /// The ingredient in the pin's own form (`"id"` / `"#tag"` / a list), which is what
+    /// `Host::recipe_ingredient` reads.
+    pub ingredient: Json,
     pub results: Vec<CrushResult>,
 }
 
@@ -137,14 +551,14 @@ impl CrushingRecipe {
     /// Parse a recipe file. The JSON is the pin's custom-recipe JSON, unchanged
     /// from 1.21.1 (the custom table keeps it as written).
     pub fn parse(id: &str, json: &str) -> Result<Self, RecipeError> {
-        let value: Value =
-            serde_json::from_str(json).map_err(|_| RecipeError::MissingIngredient)?;
-        if value.get("ingredient").is_none() {
-            return Err(RecipeError::MissingIngredient);
-        }
+        let value = Json::parse(json).ok_or(RecipeError::MissingIngredient)?;
+        let ingredient = value
+            .get("ingredient")
+            .map(ingredient_json)
+            .ok_or(RecipeError::MissingIngredient)?;
         let results = value
             .get("result")
-            .and_then(Value::as_array)
+            .and_then(Json::as_array)
             .ok_or(RecipeError::MissingResult)?;
         if results.is_empty() {
             return Err(RecipeError::MissingResult);
@@ -157,9 +571,9 @@ impl CrushingRecipe {
             let stack = entry.get("result").ok_or(RecipeError::BadResult)?;
             let item = stack
                 .get("id")
-                .and_then(Value::as_str)
+                .and_then(Json::as_str)
                 .ok_or(RecipeError::BadResult)?;
-            let count = stack.get("count").and_then(Value::as_i64).unwrap_or(1);
+            let count = stack.get("count").and_then(Json::as_i64).unwrap_or(1);
             if item.is_empty() || !(1..=99).contains(&count) {
                 return Err(RecipeError::BadResult);
             }
@@ -180,6 +594,7 @@ impl CrushingRecipe {
         }
         Ok(CrushingRecipe {
             id: id.to_owned(),
+            ingredient,
             results: parsed,
         })
     }
@@ -279,20 +694,20 @@ pub fn bonus_for(recipe: &CrushingRecipe, roll: f32) -> Option<&CrushResult> {
 }
 
 /// A 1.21.1 ingredient (`{"item": ...}` / `{"tag": ...}` / a list) as the
-/// pin's `native_recipe_ingredient` names it (`"id"` / `"#tag"` / a list).
+/// pin's `recipe_ingredient` names it (`"id"` / `"#tag"` / a list).
 #[must_use]
-pub fn ingredient_json(value: &Value) -> Value {
+pub fn ingredient_json(value: &Json) -> Json {
     match value {
-        Value::Object(object) => {
-            if let Some(item) = object.get("item").and_then(Value::as_str) {
-                Value::String(item.to_owned())
-            } else if let Some(tag) = object.get("tag").and_then(Value::as_str) {
-                Value::String(format!("#{tag}"))
+        Json::Object(_) => {
+            if let Some(item) = value.get("item").and_then(Json::as_str) {
+                Json::String(item.to_owned())
+            } else if let Some(tag) = value.get("tag").and_then(Json::as_str) {
+                Json::String(format!("#{tag}"))
             } else {
                 value.clone()
             }
         }
-        Value::Array(entries) => Value::Array(entries.iter().map(ingredient_json).collect()),
+        Json::Array(entries) => Json::Array(entries.iter().map(ingredient_json).collect()),
         _ => value.clone(),
     }
 }
@@ -777,27 +1192,27 @@ pub struct LaserRecipe {
     pub id: String,
     pub energy: i32,
     /// The ingredient as the pin's `recipe_ingredient` names it (`"id"` / `"#tag"` / a list).
-    pub ingredient: Value,
+    pub ingredient: Json,
     /// The file's own `result` object, for the pin's `recipe_result`.
-    pub result: Value,
+    pub result: Json,
 }
 
 impl LaserRecipe {
     /// Parse a recipe file. The JSON is the pin's custom-recipe JSON, unchanged from
     /// 1.21.1 (the custom table keeps it as written).
     pub fn parse(id: &str, json: &str) -> Result<Self, LaserError> {
-        let value: Value = serde_json::from_str(json).map_err(|_| LaserError::MissingIngredient)?;
+        let value = Json::parse(json).ok_or(LaserError::MissingIngredient)?;
         let ingredient = value
             .get("ingredient")
             .ok_or(LaserError::MissingIngredient)?;
         if !matches!(
             ingredient,
-            Value::Object(_) | Value::Array(_) | Value::String(_)
+            Json::Object(_) | Json::Array(_) | Json::String(_)
         ) {
             return Err(LaserError::MissingIngredient);
         }
         let result = value.get("result").ok_or(LaserError::MissingResult)?;
-        if result.get("id").and_then(Value::as_str).is_none() {
+        if result.get("id").and_then(Json::as_str).is_none() {
             return Err(LaserError::MissingResult);
         }
         let energy = value
@@ -819,7 +1234,7 @@ impl LaserRecipe {
     /// The item id the conversion produces.
     #[must_use]
     pub fn result_id(&self) -> Option<&str> {
-        self.result.get("id").and_then(Value::as_str)
+        self.result.get("id").and_then(Json::as_str)
     }
 
     /// How many items the conversion produces (1 unless the file says otherwise).
@@ -827,7 +1242,7 @@ impl LaserRecipe {
     pub fn result_count(&self) -> i32 {
         self.result
             .get("count")
-            .and_then(Value::as_i64)
+            .and_then(Json::as_i64)
             .unwrap_or(1)
             .clamp(1, 99) as i32
     }
@@ -1290,8 +1705,13 @@ mod reconstructor_tests {
         assert_eq!(recipe.energy, 40);
         assert_eq!(
             recipe.ingredient,
-            Value::String("#c:dusts/redstone".into()),
+            Json::String("#c:dusts/redstone".into()),
             "the ingredient is the pin's own form, as the crusher's recipes use"
+        );
+        assert_eq!(
+            recipe.ingredient.to_string(),
+            r##""#c:dusts/redstone""##,
+            "the text handed to recipe_ingredient is the spec, quoted"
         );
         assert_eq!(
             recipe.result_id(),
@@ -1382,6 +1802,12 @@ mod tests {
                 chance: 1.0
             }]
         );
+        assert_eq!(
+            recipe.ingredient,
+            Json::String("minecraft:coal_ore".into()),
+            "the ingredient is read in the same pass as the results"
+        );
+        assert_eq!(recipe.ingredient.to_string(), r#""minecraft:coal_ore""#);
         assert!(recipe.bonus().is_none());
     }
 
@@ -1564,29 +1990,6 @@ mod tests {
         crusher.energy = CRUSHER_ENERGY_PER_TICK;
         assert_eq!(crusher.tick(false), Step::Idle);
         assert_eq!(crusher.progress, 0, "no work resets the timer");
-    }
-
-    #[test]
-    fn an_upstream_ingredient_becomes_the_pins_json() {
-        assert_eq!(
-            ingredient_json(&serde_json::json!({"item": "minecraft:coal_ore"})),
-            serde_json::json!("minecraft:coal_ore")
-        );
-        assert_eq!(
-            ingredient_json(&serde_json::json!({"tag": "c:ores"})),
-            serde_json::json!("#c:ores")
-        );
-        assert_eq!(
-            ingredient_json(&serde_json::json!([
-                {"item": "minecraft:gravel"},
-                {"tag": "minecraft:coals"}
-            ])),
-            serde_json::json!(["minecraft:gravel", "#minecraft:coals"])
-        );
-        assert_eq!(
-            ingredient_json(&serde_json::json!("minecraft:stone")),
-            serde_json::json!("minecraft:stone")
-        );
     }
 
     #[test]

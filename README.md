@@ -2,7 +2,7 @@
 
 The **Coal Generator**, the **Crusher** and the **Atomic Reconstructor** of Actually Additions
 1.3.26 (`Ellpeck/ActuallyAdditions`, **MIT**) as one flat SDK package (mod API `0.2`, version
-`0.2.8`), built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` and
+`0.2.9`), built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` and
 mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` for Minecraft 26.3.
 
 - [`FINDINGS.md`](FINDINGS.md) — upstream behaviour read from the source, the slice boundary and
@@ -56,10 +56,10 @@ start), the ore's generation (`blocked(configured-feature-not-registered)`), the
 ## Quick checks
 
 ```sh
-cargo test --offline                                       # 56 tests: 20 runtime, 17 reconstructor (pulse + conversion), 19 glue
+cargo test --offline                                       # 59 tests: 19 runtime, 4 json, 17 reconstructor (pulse + conversion), 19 glue
 cargo clippy --all-targets --offline -- -D warnings         # 0 warnings
 cargo fmt --check                                          # not --all: that checks the fetched SDK
-cargo horizon-mod build                                    # keep Cargo.lock in the tree (declares serde_json)
+rm -f Cargo.lock && cargo horizon-mod build                # no lock in the tree: the registry packs none (R9)
 cargo horizon-mod check actuallyadditions.hmod              # the registry's package check
 cargo horizon-mod fits actuallyadditions.hmod --build 0a875da
 cargo horizon-mod fits actuallyadditions.hmod --build 0b14f8a   # a different build: not a tautology

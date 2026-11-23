@@ -349,7 +349,7 @@ Nothing was deleted: `mixins/`, `actuallyadditions.hnmod`, `compatibility.json`,
 | Path | What it is |
 |---|---|
 | `horizon-mod.toml` | the only manifest and identity: `id = "actuallyadditions"`, `version = "0.2.0"`, `api = "0.2"`, `side = "both"`, `capabilities = ["registries"]`, `[native]` pinned to `0b14f8a`/`e59da90` |
-| `Cargo.toml` | one crate, `edition = "2024"`; `horizon-mod-api` from `.horizon/sdk/` plus `serde_json = "=1.0.151"` (the version the SDK's own lock pins) |
+| `Cargo.toml` | one crate, `edition = "2024"`; `horizon-mod-api` from `.horizon/sdk/` **only** — the `serde_json = "=1.0.151"` this row used to carry was removed in 0.2.9, when the registry's R9 refused it (see "The registry's R9") |
 | `src/lib.rs` | the one `#[mod_api::horizon_mod] impl Hooks`: `register`, `register_commands`, `run_mod_command`, `level_tick_post`, `world_lifecycle` — five methods, each one line into `support` |
 | `src/support.rs` | all the game glue: the two block-entity Parts (click + tick), the container/energy declarations, the recipe cache, the energy push, the command body. 11 unit tests |
 | `src/runtime.rs` | the pure truth (generator, crusher, recipe parser), **byte-identical**, 15 tests |
@@ -468,6 +468,10 @@ capabilities, `fn:move_energy`, and the `horizon_mod` / `horizon_part` macros. T
    launcher-side pin the SDK documents (`horizon-launcher native-lock .`) is **not installed
    here** and could not run: the exact `=` pin in `Cargo.toml` is what carries the version. Verify
    this at the first real launcher build.
+   **Superseded in 0.2.9, and the reversal is the point:** the registry refuses a package that
+   declares *any* dependency but the SDK path dep (rule R9), so a package with a registry
+   dependency cannot be published at all. The dependency is gone and `src/runtime.rs` reads the
+   recipe JSON with its own reader (see "The registry's R9").
 3. **`Compound` and `Tag` are two different `get`s.** `Compound` *is* the `BTreeMap<JavaString,
    Tag>`, so `nbt.get("energy")` does not compile (`expected &JavaString`). Keep the codec on
    `Tag` (`Tag::get(&str)`, as `mekanismgenerators` does) and wrap at the boundary:
@@ -508,8 +512,9 @@ sync, the FE lost on break, the relay, the remaining machines). Added by this fo
    fail-capability are unchanged and ready for a launcher-built game.
 2. **The unreadable-recipe log line is gone** (no logger in the SDK); the skip itself and the
    readout are unchanged.
-3. **`serde_json` is the package's one registry dependency**, pinned by `Cargo.toml` rather than by
-   a lock (trap 2); `horizon-launcher native-lock` is the documented tool and is not installed.
+3. **~~`serde_json` is the package's one registry dependency~~ — removed in 0.2.9.** It was pinned
+   by `Cargo.toml` rather than by a lock (trap 2); the registry's R9 then refused the package for
+   it, and the reader now lives in `src/runtime.rs` (see "The registry's R9").
 4. **The click is the block's `useItemOn`** (deliberate; see "Behaviour that changed").
 
 ### Changelog (0.2.0)
@@ -826,16 +831,27 @@ travel"), which passes only on the defect:
 `FAIL: SELFTEST drops: the payload carries no Items (the fixed behaviour); …` + `EXIT:1`
 (`e2e-launcher-selftest-drops.log`).
 
-### 2. The registry `Cargo.lock` now ships
+### 2. The registry `Cargo.lock` now ships — and 0.2.9 reverses it
 
-The crate declares `serde_json = "=1.0.151"`, so the package must pack its lock
-(`verify-sdk-package.py` refuses an unlocked package that declares a registry dependency; the
-launcher's clean build needs it). The 0.2.2 build removed the lock before building — that is why
-it was absent. 0.2.3 keeps the tree's lock (`sha256 4938025f0ffa737da852043f35a5b7a190fe071f0719af4f597279c7d06e35fd`,
-8,850 B) and the pass packs it: the archive is **91 entries instead of 90**, `Cargo.lock` is the
-91st, and its bytes in the package equal the tree's. The 0.2.0 migration trap 2 ("`cargo
-horizon-mod build` packs no `Cargo.lock`") is superseded: it packs it **when it is present**, and
-it should be present.
+**The rule this section stated is dead for the registry.** It read: *the crate declares
+`serde_json = "=1.0.151"`, so the package must pack its lock (`verify-sdk-package.py` refuses an
+unlocked package that declares a registry dependency; the launcher's clean build needs it)*. That
+was true for the **launcher**, and 0.2.3–0.2.8 acted on it: 0.2.3 kept the tree's lock
+(`sha256 4938025f0ffa737da852043f35a5b7a190fe071f0719af4f597279c7d06e35fd`, 8,850 B), the archive
+became **91 entries instead of 90**, and every later version packed it (0.2.8: 152 entries).
+
+The **registry** closed the door instead of opening it. Its `tools/native-subset/README.md`, rule
+R9, verbatim:
+
+> `Cargo.toml` has a dependency other than `horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }`, a build script, a proc-macro or a `lib.path` other than `src/lib.rs`, or a table other than `[package]`, `[dependencies]`, `[lib]` and `[lints]`.
+
+and the automated check at `495701cf` refused 0.2.8 with **`rules R9`**. So a package with a
+registry dependency **cannot be published at all** — the lock it forces is not a workaround, it is
+the evidence of the violation. `Cargo.toml` now declares the SDK path dependency and nothing else,
+`src/` uses no crate, and the archive carries **no `Cargo.lock`**
+(`rm -f Cargo.lock` before `cargo horizon-mod build`; 0.2.2's shape, now for a different reason).
+The 0.2.0 migration trap 2 stands only for the launcher's own clean build, which applies to no
+package this campaign ships.
 
 ### 3. The upstream MIT notice is verbatim
 
@@ -2192,11 +2208,119 @@ in-game log names the sha above.
 > and its output in the world (the review's finding on 0.2.6/0.2.7). 56 unit tests, 9 in-game legs,
 > 152 entries, 150,252 B, sha256 `5440228f…3097`.
 
-## Next slice (0.2.9)
+## Slice 8 (0.2.9, 2026-11-23) — the registry's R9: no crate dependency, no lock
+
+**This is a packaging slice, not a family slice.** 0.2.8 was published and then refused by the
+registry's automated check, so 0.2.9 ships the same gameplay in a package the checks accept. No
+family was added, none was dropped; every coverage row of 0.2.8 stands.
+
+### The red, verbatim
+
+The registry's automated check at `495701cf` refused the 0.2.8 update:
+
+> This native mod update waits for a reviewer: the automatic checks at `495701cf` refused **rules R9**.
+
+Rule R9, from the registry's `tools/native-subset/README.md`:
+
+> `Cargo.toml` has a dependency other than `horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }`, a build script, a proc-macro or a `lib.path` other than `src/lib.rs`, or a table other than `[package]`, `[dependencies]`, `[lib]` and `[lints]`.
+
+0.2.8 declared `serde_json = "=1.0.151"` and packed the `Cargo.lock` that dependency forces — which
+is the same violation twice over: the dependency is refused, and the lock it "requires" is the
+evidence of it. **The rule this campaign wrote ("declare a dependency, pack its lock") is dead for
+the registry**; it was right for the launcher and is recorded as historical in "The registry
+`Cargo.lock` now ships — and 0.2.9 reverses it".
+
+### The choice: the reader moves into `src/`, not into a build-time tool
+
+The brief allowed either a dependency-free reader or a content-generation tool that resolves the
+table so `src/` only reads it. **A tool cannot do this one**, because the table is not this
+package's own data: `find_recipe` asks the world with
+`host.recipes_of_type("actuallyadditions:crushing")`, so a data pack's override, another pack's
+added recipe and a `/reload` all change it at run time (the cache is rebuilt every 40 ticks for
+exactly that reason). A table frozen at package-build time would ignore all three. So the parse
+stays on the recipe path and the crate dependency is replaced by a reader in the pure module:
+
+- `Json` — `Null` / `Bool` / `Number(String)` / `String` / `Array` / `Object(Vec<(String, Json)>)`.
+  A number keeps the digits it was written with, so `count: 3` is an integer for `as_i64`, `chance:
+  0.5` is `0.5` for `as_f64`, and `1e2` survives the round trip — the same answers `serde_json`'s
+  `as_i64`/`as_f64` give.
+- `Json::parse` — a byte cursor (JSON's structure is ASCII), strings copied whole including
+  `\uD83D\uDE00` surrogate pairs, nesting capped at 128, which is serde_json's own default.
+- `impl Display for Json` — the compact document, so `.to_string()` still hands the host the text
+  `recipe_ingredient` / `recipe_result` read. The host's own `Value` is only ever *printed* in
+  `support.rs`, never named, which is what removes the second parser as well.
+- `CrushingRecipe` and `LaserRecipe` now carry the normalised `ingredient: Json` from the same pass,
+  so the glue no longer parses each recipe file twice (once for the results, once for the
+  ingredient).
+
+Same rules, same refusals: `MissingIngredient`, `MissingResult`, `TooManyResults`, `BadResult`,
+`BadChance`, `MissingEnergy` and `BadEnergy` keep their triggers, and the test that pins them
+(`a_broken_recipe_is_refused_with_the_reason`) is unchanged.
+
+### TDD
+
+`json_tests` was written first with `Json::parse` at `todo!()`: **12 failed / 47 passed**, every
+failure the reader's own `not yet implemented` panic — `sdk-test-red-json.log`. Then the reader,
+then **59 passed / 0 failed** (19 `runtime::tests`, 4 `json_tests`, 17 `reconstructor_tests`, 19
+`support::tests`). The old `an_upstream_ingredient_becomes_the_pins_json` test became
+`a_recipe_ingredient_becomes_the_pins_form` in `json_tests`, now over parsed documents instead of
+`serde_json::json!` literals.
+
+### Ladder (0.2.9, slot `W1/aa`, `CARGO_INCREMENTAL=0`, `BUILD_LOCAL=1`)
+
+| Step | Result |
+|---|---|
+| rules (red) | 12 failed / 47 passed, `Json::parse` at `todo!()` — `sdk-test-red-json.log` |
+| tests | **59 passed**, 0 failed (19 runtime, 4 json, 17 reconstructor, 19 glue), `Compiling actuallyadditions v0.2.9` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings`, exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check`, exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` — `6 recipe(s), 11 craftable, 0 blocked, 0 failure(s)` — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice — **151,085 B** both, `cmp` identical, sha256 `964b0a83…9911`, **151 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `actuallyadditions 0.2.9 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 151085 bytes, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` → **1/1**, including the R9 checks (`Cargo.toml tables R9 allows`, `SDK-only dependencies (R9)`, `no build script (R9)`, `[lib] is src/lib.rs and no proc-macro (R9)`, `no packed Cargo.lock`) |
+| launcher build | `native-0a875da-90007b61b7ec`, `Compiling actuallyadditions (1 of 1)`, `native-mods.json` names `actuallyadditions 0.2.9` — `launcher-build.log` |
+| in-game | `tools/e2e.sh` (`--offscreen`, the launcher build of this package) → `PASS` + `EXIT:0` — `e2e-launcher.log` |
+| counterfactual | `NEGATIVE=1`, `SELFTEST=1`, `drops`, `ore`, `laser`, `item`, `pulse` → each `FAIL:` + `EXIT:1` |
+| control | `CONTROL=1` (the same Nightly, no package) → `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` → `logs=9 ok=9` |
+
+Artifact: `actuallyadditions.hmod`, **151,085 B**, sha256
+`964b0a83c110f3eabb00a763b338246dc7860eb241c2727705a94bcf8ccd9911`, **151 entries** (0.2.8's 152
+less the lock), no `Cargo.lock`. Every in-game log names that sha.
+
+### Harness facts measured while getting here
+
+1. **`fits` matches a local type by name, so `Reader` false-failed the different build.** A private
+   `struct Reader` in `runtime.rs` made `fits --build 0b14f8a` answer
+   `does not fit: 1 item changed — the type wire::Reader can no longer be built with a literal, and
+   src/runtime.rs:50 builds it`: the analyser resolved the literal against the SDK's own
+   `type:wire::Reader`, which this port never names. Renamed `JsonReader` and the same build
+   answers `0b14f8a  fits`. This is the `Block`/`Item` trap in another costume: **pick a local type
+   name the SDK's surface does not carry** (`python3` over `ports/_shared/sdk/0a875da/surface.json`).
+2. **`verify-sdk-package.py` gained explicit R9 rows** (the tables, the dependency set, the build
+   script, the `lib.path`, the absent lock), so the gate now answers the registry's rule rather than
+   inferring it from whether a lock is packed.
+
+**Changelog (0.2.9):**
+
+> **0.2.9 — the package meets the registry's R9.** The `serde_json` dependency and the `Cargo.lock`
+> it forced are gone: the registry refuses any dependency but the SDK path dep (rule R9), and a
+> package that declares one cannot be published at all. `src/runtime.rs` reads the
+> `actuallyadditions:crushing` and `actuallyadditions:laser` files with its own reader (`Json`), so
+> a data pack's recipes, its overrides and a `/reload` are read exactly as before; the glue no
+> longer parses each file twice. Same behaviour, same 59 unit tests (4 new for the reader), same 9
+> in-game legs, 151 entries, 151,085 B, sha256 `964b0a83…9911`.
+
+## Next slice (0.2.10)
 
 **Family:** the **lens items and the lens slot** — the one part of the reconstructor upstream still has
 and this port cannot use. Checked against the jar while writing this, because the 0.2.6 note guessed at a
 blocker that is not there:
+
+(0.2.9 took the number this section was written for, with the registry's R9 packaging fix; the proposal
+stands unchanged for 0.2.10.)
 
 - `actuallyadditions:lens` **is craftable in a crafting table** (`GGG / GBG / GGG` = eight
   `#c:glass_blocks` + one `black_quartz`, `data/…/recipe/lens.json`), and `black_quartz` ships — so a lens
