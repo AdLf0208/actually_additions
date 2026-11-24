@@ -113,12 +113,13 @@
 # ("the stone stays"), which the 60,000 CF ore swap makes false; SELFTEST=detonation flips the
 # blast assertion ("nothing was spent and no fire was lit"), which the 250,000 CF blast makes
 # false; SELFTEST=killer flips the kill assertion ("the cow survives and only the gate is spent"),
-# which the 2,500 CF fake-player hit makes false. NEGATIVE=1 flips the crafting phase's recipe-book
-# assertion ("the Coal Generator's recipe is not unlocked"), which is the pre-0.2.4 state, so it must
-# fail on this package.
+# which the 2,500 CF fake-player hit makes false; SELFTEST=disenchant flips the move assertion
+# ("both items stay unchanged and only the gate is spent"), which the 250,000 CF enchantment move
+# makes false. NEGATIVE=1 flips the crafting phase's recipe-book assertion ("the Coal Generator's
+# recipe is not unlocked"), which is the pre-0.2.4 state, so it must fail on this package.
 #
 #   GAME=<launcher-built horizon-client> [CTL=<horizon-ctl>] [CONTROL_GAME=<unmodded game>] \
-#       [SELFTEST=1|drops|ore|laser|item|pulse|lens|lens-effect|detonation|killer] [NEGATIVE=1] tools/e2e.sh
+#       [SELFTEST=1|drops|ore|laser|item|pulse|lens|lens-effect|detonation|killer|disenchant] [NEGATIVE=1] tools/e2e.sh
 set -euo pipefail
 export LC_ALL=C
 
@@ -2136,6 +2137,122 @@ echo "  cows alive after the plain lens's shot: $DIFF_COW_BEFORE -> $DIFF_COW_AF
 ctl command "tp @s 0.5 100 3.5" >/dev/null
 ctl wait 6
 
+# ---------------------------------------------------------------------------
+# Q: the disenchanting lens's own beam effect (0.2.14)
+# ---------------------------------------------------------------------------
+echo "== the disenchanting lens's own beam effect (0.2.14) =="
+# `LensDisenchanting.invoke` (cd9d9c6, LensDisenchanting.java:29-77) spends its own 250,000 CF on a
+# book + enchanted-item pair in the hit cell's AABB(x,y,z,x+1,y+1,z+1) (no inflation), reaches 5, and
+# returns true only when a disenchant happened. The artefact's item is `lens_of_disenchanting` —
+# its craft needs eight empowered crystals this package lacks, so the rig gives it. The pin's
+# `minecraft:stored_enchantments` / `minecraft:enchantments` components are the book/item halves.
+DIS_Z=82
+ctl command "fill -10 99 78 22 99 86 minecraft:stone" >/dev/null
+ctl command "fill -10 100 78 22 110 86 minecraft:air" >/dev/null
+
+# Q1: the readout, with a solid sight and no items, proves the lens id selects its own rule.
+READ_X=0
+ctl command "setblock $READ_X 100 $DIS_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $((READ_X + 2)) 100 $DIS_Z minecraft:stone" >/dev/null
+ctl command "give @s actuallyadditions:lens_of_disenchanting 1" >/dev/null
+ctl wait 4
+ctl select actuallyadditions:lens_of_disenchanting >/dev/null
+echo "  the disenchanting lens is harness-given (its craft needs empowered crystals): $(ctl inventory | jq -c '.held.item // empty')"
+click_with actuallyadditions:lens_of_disenchanting "$READ_X" 100 "$DIS_Z"
+line=$(info "$READ_X" 100 "$DIS_Z")
+echo "  after the disenchanting-lens click: $line"
+case "$line" in
+    *"lens actuallyadditions:lens_of_disenchanting x1"*) ;;
+    *) fail "the disenchanting lens did not fill the slot: $line" ;;
+esac
+case "$(sight_of "$line")" in
+    *"disenchanting @ 250000 CF"*) ;;
+    *) fail "the readout did not name the disenchanting price: $(sight_of "$line")" ;;
+esac
+ctl command "setblock $READ_X 100 $DIS_Z minecraft:air" >/dev/null
+ctl command "setblock $((READ_X + 2)) 100 $DIS_Z minecraft:air" >/dev/null
+ctl command "clear @s" >/dev/null
+
+# Q2: a plain book and an enchanted diamond sword as item entities in the sighted AIR cell. Both
+# sit in the same cell (x 6..7, y 100..101, z 82..83) with a never-expiring pickup delay, so the
+# beam's box holds them; they are placed at different x so they do not shove each other out.
+DIS_X=4
+DIS_CELL=$((DIS_X + 2))
+ctl command "setblock $DIS_X 100 $DIS_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "kill @e[type=item]" >/dev/null
+ctl command "summon minecraft:item 6.2 100 $(centre "$DIS_Z") {Item:{id:\"minecraft:book\",count:1},PickupDelay:32767s}" >/dev/null
+ctl command "summon minecraft:item 6.8 100 $(centre "$DIS_Z") {Item:{id:\"minecraft:diamond_sword\",count:1,components:{\"minecraft:enchantments\":{\"minecraft:sharpness\":1}}},PickupDelay:32767s}" >/dev/null
+ctl wait 10
+BOOK_NBT() { ctl command "data get entity @e[type=minecraft:item,nbt={Item:{id:\"minecraft:book\"}},limit=1,sort=nearest] Item" 2>&1 || true; }
+SWORD_NBT() { ctl command "data get entity @e[type=minecraft:item,nbt={Item:{id:\"minecraft:diamond_sword\"}},limit=1,sort=nearest] Item" 2>&1 || true; }
+BEFORE_BOOK=$(BOOK_NBT)
+BEFORE_SWORD=$(SWORD_NBT)
+echo "  the book before the shot: $BEFORE_BOOK"
+echo "  the enchanted sword before the shot: $BEFORE_SWORD"
+case "$BEFORE_SWORD" in
+    *sharpness*) ;;
+    *) fail "the summoned sword did not carry sharpness before the shot: $BEFORE_SWORD" ;;
+esac
+ctl tp "$((DIS_X + 6)).5" 100 "$(centre "$DIS_Z")" >/dev/null
+click_with actuallyadditions:lens_of_disenchanting "$DIS_X" 100 "$DIS_Z"
+line=$(info "$DIS_X" 100 "$DIS_Z")
+case "$line" in
+    *"lens actuallyadditions:lens_of_disenchanting x1"*) ;;
+    *) fail "the disenchanting lens did not fill the shot machine's slot: $line" ;;
+esac
+charge "$DIS_X" 100 "$DIS_Z" 251000 >/dev/null
+# A 100-tick cycle is position-phased, so a fixed wait can sample either side of the shot.
+for _ in $(seq 1 60); do
+    ctl wait 4 >/dev/null
+    DIS_LINE=$(info "$DIS_X" 100 "$DIS_Z")
+    [ "$(energy_of "$DIS_LINE")" = 251000 ] || break
+done
+DIS_ENERGY=$(energy_of "$DIS_LINE")
+AFTER_BOOK=$(BOOK_NBT)
+AFTER_SWORD=$(SWORD_NBT)
+echo "  after the disenchant shot: $DIS_LINE"
+echo "  the book after the shot: $AFTER_BOOK"
+echo "  the sword after the shot: $AFTER_SWORD"
+if [ "$SELFTEST" = disenchant ]; then
+    # The flipped assertion is the differential's outcome: no stored enchantment moved and only
+    # the 1,000 CF gate was spent. This package makes that false.
+    if [ "$DIS_ENERGY" = 250000 ] && ! grep -q stored_enchantments <<<"$AFTER_BOOK"; then
+        fail "SELFTEST disenchant: the flipped assertion passed (no disenchant), so it proves nothing"
+    fi
+    fail "SELFTEST disenchant: the book gained stored_enchantments and the buffer read 0 (the real assertion); the flipped assertion 'both unchanged, only the gate spent' fails, so the real one can fail"
+fi
+grep -q stored_enchantments <<<"$AFTER_BOOK" || fail "the enchantment did not move onto the book: $AFTER_BOOK"
+grep -q sharpness <<<"$AFTER_BOOK" || fail "the book's stored enchantments do not name sharpness: $AFTER_BOOK"
+! grep -q sharpness <<<"$AFTER_SWORD" || fail "the sword kept the moved enchantment: $AFTER_SWORD"
+[ "$DIS_ENERGY" = 0 ] || fail "the disenchanting lens did not spend its 250,000 CF: $DIS_LINE"
+
+# Q3: differential — the same rig with the plain lens leaves both items and spends only the gate.
+DIFF_DIS_X=10
+ctl command "setblock $DIFF_DIS_X 100 $DIS_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "kill @e[type=item]" >/dev/null
+ctl command "summon minecraft:item 12.2 100 $(centre "$DIS_Z") {Item:{id:\"minecraft:book\",count:1},PickupDelay:32767s}" >/dev/null
+ctl command "summon minecraft:item 12.8 100 $(centre "$DIS_Z") {Item:{id:\"minecraft:diamond_sword\",count:1,components:{\"minecraft:enchantments\":{\"minecraft:sharpness\":1}}},PickupDelay:32767s}" >/dev/null
+ctl wait 10
+ctl tp "$((DIFF_DIS_X + 6)).5" 100 "$(centre "$DIS_Z")" >/dev/null
+charge "$DIFF_DIS_X" 100 "$DIS_Z" 251000 >/dev/null
+ctl wait 120 >/dev/null
+DIFF_DIS_LINE=$(info "$DIFF_DIS_X" 100 "$DIS_Z")
+if [ "$(energy_of "$DIFF_DIS_LINE")" = 251000 ]; then
+    ctl wait 60 >/dev/null
+    DIFF_DIS_LINE=$(info "$DIFF_DIS_X" 100 "$DIS_Z")
+fi
+DIFF_BOOK=$(ctl command "data get entity @e[type=minecraft:item,nbt={Item:{id:\"minecraft:book\"}},limit=1,sort=nearest] Item" 2>&1 || true)
+DIFF_SWORD=$(ctl command "data get entity @e[type=minecraft:item,nbt={Item:{id:\"minecraft:diamond_sword\"}},limit=1,sort=nearest] Item" 2>&1 || true)
+echo "  the plain lens's shot: $DIFF_DIS_LINE"
+echo "  the plain lens's book: $DIFF_BOOK"
+echo "  the plain lens's sword: $DIFF_SWORD"
+! grep -q stored_enchantments <<<"$DIFF_BOOK" || fail "the plain lens moved an enchantment onto the book: $DIFF_BOOK"
+grep -q sharpness <<<"$DIFF_SWORD" || fail "the plain lens stripped the sword's enchantment: $DIFF_SWORD"
+[ "$(energy_of "$DIFF_DIS_LINE")" = 250000 ] || fail "the plain lens spent more than the 1,000 CF gate: $DIFF_DIS_LINE"
+
+ctl command "tp @s 0.5 100 3.5" >/dev/null
+ctl wait 6
+
 control
 
-echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), the reconstructor's redstone mode started off and a stick left it there while a click holding a redstone torch switched it to pulse mode without placing the torch, pulse mode neither ran its cycle nor fired without a signal, a redstone block beside the machine fired exactly one 1,040 CF shot on each of two rising edges (two crystals, a 2,080 CF buffer emptied, the cycle untouched) while the same machine without the toggle stayed frozen on the same signal and spent nothing, and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed; the lens (eight glass and a Black Quartz, all nine consumed) crafted and right-clicked into the reconstructor's empty slot (info read lens actuallyadditions:lens x1), a second lens was refused by the occupied slot and a stick was refused by the slot, and a dropped lens in the beam became lens_of_color for the 1,000 CF gate plus the 5,000 CF ring conversion (40 CF left) while a dropped stick stayed and spent only its gate, and the harness-given miner lens in the slot made a 61,000 CF shot swap the sighted stone for one of the nine mining-lens ores (the block read back with ctl block) while a fresh default-lens machine kept its stone and spent only its gate, and the harness-given detonator lens in the slot made a 251,000 CF shot set off the artefact's sourceless radius-10 fiery blast — spending 250,000 CF and lighting fire in the arena while **keeping** the sighted stone, because upstream's ExplosionInteraction.NONE keeps blocks at this pin — whereas a fresh default-lens machine kept its 250,000 CF, started no fire and kept its stone, and the harness-given killer lens made a 3,500 CF shot hurt a NoAI cow in the sighted air cell for 20 damage from a fake player's player_attack at 2,500 CF (the cow's health 0, the buffer 0, the readout naming killer @ 2500 CF at a solid sight) while the default-lens differential kept its cow and spent only the 1,000 CF gate"
+echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), the reconstructor's redstone mode started off and a stick left it there while a click holding a redstone torch switched it to pulse mode without placing the torch, pulse mode neither ran its cycle nor fired without a signal, a redstone block beside the machine fired exactly one 1,040 CF shot on each of two rising edges (two crystals, a 2,080 CF buffer emptied, the cycle untouched) while the same machine without the toggle stayed frozen on the same signal and spent nothing, and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed; the lens (eight glass and a Black Quartz, all nine consumed) crafted and right-clicked into the reconstructor's empty slot (info read lens actuallyadditions:lens x1), a second lens was refused by the occupied slot and a stick was refused by the slot, and a dropped lens in the beam became lens_of_color for the 1,000 CF gate plus the 5,000 CF ring conversion (40 CF left) while a dropped stick stayed and spent only its gate, and the harness-given miner lens in the slot made a 61,000 CF shot swap the sighted stone for one of the nine mining-lens ores (the block read back with ctl block) while a fresh default-lens machine kept its stone and spent only its gate, and the harness-given detonator lens in the slot made a 251,000 CF shot set off the artefact's sourceless radius-10 fiery blast — spending 250,000 CF and lighting fire in the arena while **keeping** the sighted stone, because upstream's ExplosionInteraction.NONE keeps blocks at this pin — whereas a fresh default-lens machine kept its 250,000 CF, started no fire and kept its stone, and the harness-given killer lens made a 3,500 CF shot hurt a NoAI cow in the sighted air cell for 20 damage from a fake player's player_attack at 2,500 CF (the cow's health 0, the buffer 0, the readout naming killer @ 2500 CF at a solid sight) while the default-lens differential kept its cow and spent only the 1,000 CF gate, the harness-given disenchanting lens made a 251,000 CF shot move sharpness from a dropped diamond sword onto a dropped book in the sighted cell (the book's stored_enchantments named sharpness, the sword lost it, the buffer 0, the readout naming disenchanting @ 250000 CF) while the default-lens differential left both items untouched and spent only the 1,000 CF gate"

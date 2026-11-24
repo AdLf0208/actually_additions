@@ -1,8 +1,8 @@
-# Actually Additions → Horizon (slices 1–12)
+# Actually Additions → Horizon (slices 1–13)
 
 The **Coal Generator**, the **Crusher** and the **Atomic Reconstructor** of Actually Additions
 1.3.26 (`Ellpeck/ActuallyAdditions`, **MIT**) as one flat SDK package (mod API `0.2`, version
-`0.2.13`), built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` and
+`0.2.14`), built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` and
 mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` for Minecraft 26.3.
 
 - [`FINDINGS.md`](FINDINGS.md) — upstream behaviour read from the source, the slice boundary and
@@ -48,19 +48,19 @@ mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` for Minecraft 26.3.
 | Miner lens | `LensMining.invoke` spends 60,000 CF to swap the sighted `stone_ore_replaceables` block for a weighted-random ore from `actuallyadditions:mining_lens`, then stops the beam | the miner item, the 20 top-level `mining_lens` recipes and their tags ship; with it installed a 61,000 CF shot replaces the sighted stone (the default lens keeps it and spends only the gate). Its own craft needs crystals this package lacks, so the in-game rig **gives** the item |
 | Detonator lens | `LensDetonation.invoke` spends 250,000 CF on a sourceless radius-10, `fire=true`, `ExplosionInteraction.NONE` blast at the sighted block, reaches 30 blocks and stops at any non-air sight | the jar's lens item and the `LensEffect::Detonation` branch ship: a 251,000 CF shot sets off the real `LevelRef::explode` (and lights fire) and empties the buffer. `NONE` **keeps blocks at this pin**, so the stone stays — the brief's proposed crater is not artefact-true. The lens's own craft needs crystals this package lacks, so the rig **gives** it |
 | Killer lens | `LensKiller` (via `LensDeath.invoke`) hurts every living entity in the sighted block's cell for 20 damage from a fake player's `playerAttack`, at `getUsePerEntity()` 2,500 CF each; reach 15, stop at any non-air sight | `lens_of_the_killer` (not `lens_of_certain_death`, which is plain `LensDeath`) and the `LensEffect::Killer` branch ship: the `entities_in` cell box is queried before the air check, so a cow in an air cell is hurt too; the pin has no NeoForge `DamageSource`, so the source is `minecraft:player_attack` with a connectionless fake player as its causing entity. Its craft needs an enchanted book, so the rig **gives** the lens |
+| Disenchanting lens | `LensDisenchanting.invoke` spends its 250,000 CF on a book + enchanted-item pair in the hit cell, moving the first enchantment onto the book; reach 5, stops only when a disenchant happened | `lens_of_disenchanting` and the `LensEffect::Disenchanting` branch ship: the two stacks in the sighted cell are scanned, the first enchantment moves onto the book (`minecraft:stored_enchantments`) and is removed from the item (`minecraft:enchantments`), both item entities are rewritten in place, and the buffer pays 250,000 CF only on success. Its craft needs empowered crystals this package lacks, so the rig **gives** the lens |
 
 Not ported, and recorded as gaps in [`notes.md`](notes.md): the GUI
 (`blocked(no-single-player-mod-screen)`), the Double Crusher and the other ~44 machines, the rest of
 redstone control (only the reconstructor toggles; the generator and the crusher do not), a
-relay/cable, the Empowerer and the empowered crystals, the disenchanting lens's own beam effect
-(a book/enchantment `invoke` path, each with its own energy and box), the ore's generation
+relay/cable, the Empowerer and the empowered crystals, the ore's generation
 (`blocked(configured-feature-not-registered)`), the booklet,
 `lit`/particles.
 
 ## Quick checks
 
 ```sh
-cargo test --offline                                       # 70 tests: 51 runtime (19 + 4 json + 28 reconstructor incl. the killer lens), 19 glue
+cargo test --offline                                       # 74 tests: 55 runtime (19 + 4 json + 32 reconstructor incl. the disenchanting lens), 19 glue
 cargo clippy --all-targets --offline -- -D warnings         # 0 warnings
 cargo fmt --check                                          # not --all: that checks the fetched SDK
 rm -f Cargo.lock && cargo horizon-mod build                # no lock in the tree: the registry packs none (R9)
@@ -70,7 +70,7 @@ cargo horizon-mod fits actuallyadditions.hmod --build 0b14f8a   # a different bu
 python3 tools/check_recipe_keys.py                          # every recipe key resolves, or is a recorded blocker
 ports/tools/launcher-game.sh build actuallyadditions        # the launcher compiles the package into a game
 eval "$(ports/tools/launcher-game.sh env actuallyadditions)" && tools/e2e.sh
-                # SELFTEST=1, drops, ore, laser, item, pulse, lens, lens-effect, detonation, killer and NEGATIVE=1 must fail
+                # SELFTEST=1, drops, ore, laser, item, pulse, lens, lens-effect, detonation, killer, disenchant and NEGATIVE=1 must fail
 ```
 
 Local-only until the maintainer approves publishing (ARCHITECTURE.md §8); the artifact goes to a

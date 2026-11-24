@@ -109,6 +109,11 @@ MINING_LENS_RECIPE_DIR = "mininglens"
 # only the item is carried and the in-game rig gives it. There is no `laser/` conversion for it in
 # the jar, so it stays out of the 5,000 CF lens ring.
 KILLER_LENS = "lens_of_the_killer"
+# Slice 13 (0.2.14): the disenchanting lens item (`ActuallyItems.LENS_OF_DISENCHANTING`, whose
+# getLens() is LensDisenchanting). Its jar craft needs eight empowered Diamatine Crystals, which
+# this package does not carry, so only the item is carried and the in-game rig gives it, as for the
+# miner and killer lenses. There is no `laser/` conversion for it in the jar.
+DISENCHANT_LENS = "lens_of_disenchanting"
 # The two jar tags every top-level mining-lens recipe keys on, plus the NeoForge convention tag
 # the three nether recipes key on (26.3 ships no `c:` namespace, so it is declared here).
 ORE_REPLACEABLE_TAGS = ("stone_ore_replaceables", "deepslate_ore_replaceables")
@@ -651,6 +656,24 @@ def main() -> None:
         json.dumps({"template": "minecraft:stick", "max_stack_size": 1}, indent=2) + "\n",
     )
 
+    # (0.2.14) the disenchanting lens item, exactly as the killer's: its `items/` entry, model,
+    # texture (and the texture's `.mcmeta` animation) from the jar, its Horizon declaration with
+    # `stacksTo(1)`, and the creative tab below. Its craft is deliberately not carried (eight
+    # empowered crystals this package does not ship) and no `laser/` conversion names it.
+    for source, target in (
+        (f"assets/actuallyadditions/items/{DISENCHANT_LENS}.json", f"items/{DISENCHANT_LENS}.json"),
+        (f"assets/actuallyadditions/models/item/{DISENCHANT_LENS}.json", f"models/item/{DISENCHANT_LENS}.json"),
+        (f"assets/actuallyadditions/textures/item/{DISENCHANT_LENS}.png", f"textures/item/{DISENCHANT_LENS}.png"),
+    ):
+        copy(CARRY / source, assets / target)
+    animated = CARRY / f"assets/actuallyadditions/textures/item/{DISENCHANT_LENS}.png.mcmeta"
+    if animated.is_file():
+        copy(animated, assets / f"textures/item/{DISENCHANT_LENS}.png.mcmeta")
+    write(
+        data / f"horizon/item/{DISENCHANT_LENS}.json",
+        json.dumps({"template": "minecraft:stick", "max_stack_size": 1}, indent=2) + "\n",
+    )
+
     # Upstream's creative tab is code; one tab for the slice, with the two
     # crafting-chain pieces the machine recipes are made of.
     write(
@@ -659,7 +682,7 @@ def main() -> None:
             {
                 "title": "itemGroup.actuallyadditions.machines",
                 "icon": "actuallyadditions:coal_generator",
-                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)] + [f"actuallyadditions:{GEM}"] + [f"actuallyadditions:{i}" for i in ITEMS] + [f"actuallyadditions:{RECONSTRUCTOR}", f"actuallyadditions:{CRYSTAL}"] + [f"actuallyadditions:{i}" for i in LENS_ITEMS] + [f"actuallyadditions:{MINER_LENS}", f"actuallyadditions:{KILLER_LENS}"],
+                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)] + [f"actuallyadditions:{GEM}"] + [f"actuallyadditions:{i}" for i in ITEMS] + [f"actuallyadditions:{RECONSTRUCTOR}", f"actuallyadditions:{CRYSTAL}"] + [f"actuallyadditions:{i}" for i in LENS_ITEMS] + [f"actuallyadditions:{MINER_LENS}", f"actuallyadditions:{KILLER_LENS}", f"actuallyadditions:{DISENCHANT_LENS}"],
             },
             indent=2,
         )

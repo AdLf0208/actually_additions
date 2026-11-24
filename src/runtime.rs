@@ -1079,17 +1079,17 @@ impl Reconstructor {
 }
 
 /// The lens `ILensItem`s this package carries: the jar's 5,000 CF laser ring
-/// (`lens → lens_of_color → lens_of_detonation → lens_of_certain_death → lens`), the miner lens and
-/// the killer lens. `lens_of_disenchanting` is the one remaining lens item not carried (its own
-/// effect is a separate rule path). Every carried item's `getLens()` is honoured by [`LensEffect`];
-/// `lens_of_certain_death` is plain `LensDeath` (350 CF), not `LensKiller`.
-pub const LENS_ITEMS: [&str; 6] = [
+/// (`lens → lens_of_color → lens_of_detonation → lens_of_certain_death → lens`), the miner lens,
+/// the killer lens and the disenchanting lens. Every carried item's `getLens()` is honoured by
+/// [`LensEffect`]; `lens_of_certain_death` is plain `LensDeath` (350 CF), not `LensKiller`.
+pub const LENS_ITEMS: [&str; 7] = [
     "actuallyadditions:lens",
     "actuallyadditions:lens_of_color",
     "actuallyadditions:lens_of_detonation",
     "actuallyadditions:lens_of_certain_death",
     LENS_OF_THE_MINER,
     LENS_OF_THE_KILLER,
+    LENS_OF_DISENCHANTING,
 ];
 
 /// Whether `item` is one of the mod's lens items (`instanceof ILensItem` upstream).
@@ -1168,9 +1168,45 @@ pub fn killer_stop(air: bool) -> bool {
     !air
 }
 
+/// `LensDisenchanting.ENERGY_USE` (`LensDisenchanting.java:20`): the CF it spends on one successful
+/// disenchant, on top of the shot's 1,000 CF gate (so the machine needs 251,000 CF to fire it).
+/// `canInvoke` asks for `energy - energyUsePerShot >= ENERGY_USE` before the gate is paid.
+pub const DISENCHANTING_LENS_ENERGY: i32 = 250_000;
+
+/// `LensDisenchanting.getDistance` (`LensDisenchanting.java:63-65`): the beam walks five blocks.
+pub const DISENCHANTING_LENS_DISTANCE: i32 = 5;
+
+/// The behaviour lens whose `ItemLens.getLens()` is upstream's `LensDisenchanting`. This is
+/// `actuallyadditions:lens_of_disenchanting` (`ActuallyItems.java:121` →
+/// `ActuallyAdditionsAPI.lensDisenchanting`). Its craft needs empowered crystals this package does
+/// not carry, so the in-game rig gives the item, as for the miner and killer lenses.
+pub const LENS_OF_DISENCHANTING: &str = "actuallyadditions:lens_of_disenchanting";
+
+/// `LensDisenchanting.invoke` returns `true` only when a disenchant actually happened (the beam
+/// stops on that cell); every empty, unaffordable or incomplete cell returns `false` and lets the
+/// beam walk on — including a solid sight, unlike the miner/detonator/killer lenses.
+#[must_use]
+pub fn disenchanting_stop(converted: bool) -> bool {
+    converted
+}
+
+/// The first enchantment (id and level) and the ones left on the item, for the pure move rule.
+pub type SplitEnchantments = ((String, i32), Vec<(String, i32)>);
+
+/// The one-enchantment move from a plain item onto a book. Upstream takes
+/// `enchants.keySet().iterator().next()` — the first enchantment in `ItemEnchantments` order —
+/// and moves only that one; every other entry stays on the item (`ItemUtil.removeEnchantment`
+/// removes just that key). The glue reads levels as plain `(id, level)` pairs, so this rule stays
+/// free of SDK types.
+#[must_use]
+pub fn disenchant_split(entries: &[(String, i32)]) -> Option<SplitEnchantments> {
+    let (first, rest) = entries.split_first()?;
+    Some((first.clone(), rest.to_vec()))
+}
+
 /// Which `Lens.invoke` a held lens item selects (`TileEntityAtomicReconstructor.getLens` →
-/// `MethodHandler.invokeReconstructor`). The miner, detonator and killer lenses are distinct
-/// `invoke` paths; the disenchanting lens remains a gap.
+/// `MethodHandler.invokeReconstructor`). The miner, detonator, killer and disenchanting lenses are
+/// distinct `invoke` paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LensEffect {
     /// `LensConversion`: the default conversion of the plane and the beam's dropped items.
@@ -1181,6 +1217,8 @@ pub enum LensEffect {
     Detonation,
     /// `LensKiller`: hurt the living entities in the sighted cell with a fake player's attack.
     Killer,
+    /// `LensDisenchanting`: move the first enchantment of a dropped item onto a dropped book.
+    Disenchanting,
 }
 
 impl LensEffect {
@@ -1190,19 +1228,21 @@ impl LensEffect {
             LENS_OF_THE_MINER => Self::Mining,
             LENS_OF_DETONATION => Self::Detonation,
             LENS_OF_THE_KILLER => Self::Killer,
+            LENS_OF_DISENCHANTING => Self::Disenchanting,
             _ => Self::Conversion,
         }
     }
 
     /// Upstream `Lens.getDistance`: the default conversion lens and the miner reach ten blocks;
-    /// `LensDetonation.getDistance` returns thirty (three times as far) and the killer inherits
-    /// `LensDeath`'s fifteen.
+    /// `LensDetonation.getDistance` returns thirty (three times as far), the killer inherits
+    /// `LensDeath`'s fifteen and the disenchanting lens reaches five.
     pub fn distance(self) -> i32 {
         match self {
             Self::Conversion => RECONSTRUCTOR_LENS_DISTANCE,
             Self::Mining => MINING_LENS_DISTANCE,
             Self::Detonation => DETONATION_LENS_DISTANCE,
             Self::Killer => KILLER_LENS_DISTANCE,
+            Self::Disenchanting => DISENCHANTING_LENS_DISTANCE,
         }
     }
 }
@@ -2257,6 +2297,96 @@ mod reconstructor_tests {
         assert!(
             !killer_stop(true),
             "an air sight returns false, so the beam keeps walking"
+        );
+    }
+
+    #[test]
+    fn a_disenchanting_lens_is_accepted_by_the_slot_and_selects_its_effect() {
+        assert_eq!(
+            LENS_OF_DISENCHANTING, "actuallyadditions:lens_of_disenchanting",
+            "ActuallyItems.LENS_OF_DISENCHANTING (ActuallyItems.java:121)"
+        );
+        assert!(
+            lens_slot_accepts(None, LENS_OF_DISENCHANTING),
+            "the disenchanting lens is an ILensItem, so the empty slot accepts it"
+        );
+        assert_eq!(
+            LensEffect::of(LENS_OF_DISENCHANTING),
+            LensEffect::Disenchanting,
+            "its getLens() is LensDisenchanting, not the default conversion"
+        );
+    }
+
+    #[test]
+    fn the_disenchanting_lens_costs_250000_cf_and_reaches_five_blocks() {
+        assert_eq!(
+            DISENCHANTING_LENS_ENERGY, 250_000,
+            "LensDisenchanting.ENERGY_USE"
+        );
+        assert_eq!(
+            LensEffect::Disenchanting.distance(),
+            5,
+            "LensDisenchanting.getDistance"
+        );
+        let mut state = Reconstructor {
+            energy: 251_000,
+            ..Reconstructor::new()
+        };
+        assert_eq!(
+            state.fire(),
+            Some(250_000),
+            "the 1,000 CF gate leaves exactly the lens's own 250,000 CF price"
+        );
+        assert!(
+            state.can_afford(DISENCHANTING_LENS_ENERGY),
+            "a 251,000 CF charge can pay the disenchant"
+        );
+        state.spend(DISENCHANTING_LENS_ENERGY);
+        assert_eq!(state.energy, 0, "the disenchant's own energy is charged");
+        let mut short = Reconstructor {
+            energy: 250_999,
+            ..Reconstructor::new()
+        };
+        assert_eq!(short.fire(), Some(249_999));
+        assert!(
+            !short.can_afford(DISENCHANTING_LENS_ENERGY),
+            "251,000 CF is the exact charge: one CF short cannot disenchant"
+        );
+    }
+
+    #[test]
+    fn the_disenchanting_beam_stops_only_when_a_disenchant_happened() {
+        assert!(
+            disenchanting_stop(true),
+            "invoke returns true only on a successful disenchant, so the beam stops"
+        );
+        assert!(
+            !disenchanting_stop(false),
+            "an empty cell (or an unaffordable one) returns false, so the beam walks on"
+        );
+    }
+
+    #[test]
+    fn only_the_first_enchantment_moves_and_the_rest_stay() {
+        let entries = vec![
+            ("minecraft:sharpness".to_owned(), 1),
+            ("minecraft:looting".to_owned(), 2),
+        ];
+        let ((id, level), rest) =
+            disenchant_split(&entries).expect("an enchanted item has a first entry");
+        assert_eq!(
+            id, "minecraft:sharpness",
+            "enchantments' first key in order"
+        );
+        assert_eq!(level, 1, "the first enchantment's level");
+        assert_eq!(
+            rest,
+            vec![("minecraft:looting".to_owned(), 2)],
+            "every other enchantment stays on the item"
+        );
+        assert!(
+            disenchant_split(&[]).is_none(),
+            "an item with no enchantments cannot be disenchanted"
         );
     }
 }

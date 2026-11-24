@@ -1,5 +1,44 @@
 # Validation
 
+**0.2.14 (2026-11-24, pin `0a875da`)** — slice 13: the **disenchanting lens's own beam effect**.
+Cargo steps were forwarded to the remote runner (`REMOTE_HOST` defaults to
+`deepseek@192.168.1.115`, hostname `AdLf-PC`; no `BUILD_LOCAL=1` for the cargo steps); the launcher
+build ran in a local slot because the far box lacks `libxkbcommon-x11.so.0`. The artefact is
+`LensDisenchanting.invoke` (`cd9d9c63`): 250,000 CF on top of the 1,000 CF gate, the hit cell's
+`AABB(x,y,z,x+1,y+1,z+1)`, one book + one enchanted item, the first enchantment moved onto the
+book, reach 5, stop only on a disenchant. **Component gate passed first:** the `ItemEnchantments`
+handle and an enchanted-book component write (`ItemResource::with_component` →
+`minecraft:stored_enchantments`) both exist at this pin, so no `blocked(...)`.
+
+| Check | Command | Result |
+|---|---|---|
+| component gate | grep `surface.json` + api-source for `ItemEnchantments` and the component write | both present — `surface.json:81763-81845`, `:82385`, `resource.rs:351` |
+| rules (red) | `cargo test --offline`, the disenchant rules undefined | **13 errors**, `cannot find value LENS_OF_DISENCHANTING`, `cannot find value DISENCHANTING_LENS_ENERGY`, `no variant … named Disenchanting`, `cannot find function disenchant_stop`, `cannot find function disenchant_split` — `evidence/actuallyadditions/sdk-test-red-disenchant.log` |
+| tests | `cargo test --offline` | **74 passed / 0 failed** (55 runtime incl. 4 json and 32 reconstructor, 19 glue), `Compiling actuallyadditions v0.2.14` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (the `type_complexity` finding fixed by a `SplitEnchantments` alias) — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` | `7 recipe(s), 36 craftable, 0 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **186,835 B** both, `cmp` identical, sha256 `a27b5aec081b974255f36bd06ffaebcae74ea9db054f648aa6a72a364f94bca5`, **210 entries, no `Cargo.lock`** — `sdk-build-combined-0.2.14.log` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.14 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 186,835 bytes, EXIT 0 — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1**, `package matches the tree`, R9 rows green — `verify-gate-0.2.14.log` |
+| launcher build | fresh `native-0a875da-39c995531ce8` | `Compiling actuallyadditions (1 of 1)` — `launcher-build-0.2.14.log` |
+| in-game | `tools/e2e.sh` (`--offscreen`, the final package's launcher build) | `PASS` + `EXIT:0` — `e2e-launcher.log` (first line names the delivered sha) |
+| counterfactual | `SELFTEST=disenchant` | `FAIL: SELFTEST disenchant: the book gained stored_enchantments and the buffer read 0 (the real assertion) …` + `EXIT:1` — `e2e-launcher-selftest-disenchant.log` |
+| counterfactual | `SELFTEST={killer,detonation,lens-effect,lens,1,drops,ore,laser,item,pulse}` | each `FAIL:` + `EXIT:1` — the ten earlier selftest logs |
+| counterfactual | `NEGATIVE=1` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour)` + `EXIT:1` — `e2e-launcher-negative.log` |
+| control | `CONTROL=1` (the same Nightly, no package) | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=14 ok=14 missing-exit=0 bad-exit=0`, exit 0 — `e2e-audit-0.2.14.log` (kept outside the e2e dir so it is not audited as a 15th log) |
+
+The disenchant phase's own lines (`e2e-launcher.log`): the harness-given `lens_of_disenchanting`
+fills the slot and the readout names `minecraft:stone -> disenchanting @ 250000 CF`; a 251,000 CF
+shot moves `minecraft:sharpness` from a dropped diamond sword's `minecraft:enchantments` onto a
+dropped book's `minecraft:stored_enchantments`, the sword's enchantments are gone and the buffer
+reads 0; the default-lens differential leaves the book plain, the sword enchanted and keeps 250,000
+CF. `SELFTEST=disenchant` flips it to "both unchanged and only the gate spent", which fails on this
+package. The 13 earlier legs are unchanged and re-proved in the same run.
+
 **0.2.13 (2026-11-24, pin `0a875da`)** — slice 12: the **killer lens's own beam effect**. Every
 cargo step was forwarded to the remote runner (`REMOTE_HOST` defaults to `deepseek@192.168.1.115`,
 whose hostname is `AdLf-PC`; no `BUILD_LOCAL=1` for the cargo steps); the launcher build ran in a

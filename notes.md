@@ -3057,3 +3057,202 @@ ingredient are not carried and its craft may need a components predicate 26.3 ca
 - **Check first:** grep the pin for the exact `ItemEnchantments` handle and for an enchanted-book
   component write; if either is absent, stop with `blocked(<symbol>)` rather than substituting a
   plain item swap. Out of scope: the GUI, the Double Crusher, the ore's generation.
+
+## Slice 13 (0.2.14, 2026-11-24) — the disenchanting lens's own beam effect
+
+**Family:** `LensDisenchanting.invoke`, the last distinct `Lens.invoke` rule path in the gap list:
+a book + enchanted-item pair in the hit cell, one enchantment moved from the item onto the book for
+the lens's own 250,000 CF. The lens item, the slot and the lens ring ship already; this slice adds
+the `LensEffect::Disenchanting` branch and carries the one missing lens item.
+
+- **Gap line** (0.2.13 coverage table): *"the disenchanting lens effect — not ported (next slice;
+  distinct rule path) — a book + enchanted-item box at 250,000 CF; the pin's `ItemEnchantments`
+  surface exists but no branch is carried"*.
+- **Why it fits `machines`:** one more branch in the beam the port already ships, driven by the lens
+  id in the slot it already accepts — no new block, renderer or hook kind, as for the miner,
+  detonator and killer slices.
+- **Pin:** `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` + mixins
+  `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
+
+### The component gate (passed, before any edit)
+
+- The exact `ItemEnchantments` handle exists: `surface.json:81763-81845` (`MAX_LEVEL`, `is_empty`,
+  `iter`, `len`, `level`, `retain`, `set`, `upgrade`) and
+  `crates/horizon-mod-vocab/src/item/types.rs:472`.
+- An enchanted-book component **write** exists: `ItemResource::with_component(&dyn Host,
+  &ComponentId, Tag)` (`surface.json:82385`, `content/resource.rs:351`) writing
+  `minecraft:stored_enchantments` (listed in `horizon-mod-api/src/parts/items.rs:2038`); the read
+  side is `ItemResource::value` (`surface.json:82372`); a dropped stack is read/written whole with
+  `ItemEntityRef::stack`/`set_stack` (`surface.json:81961`/`81937`); `ComponentId::new` validates
+  the id (`content/resource.rs:22`). No `blocked(...)`: every surface is real.
+
+### The artefact, not the brief (`cd9d9c63`, `LensDisenchanting.java`; `MethodHandler.java:281-303`)
+
+| Rule | Value | Source |
+|---|---|---|
+| lens item | **`actuallyadditions:lens_of_disenchanting`** (`ActuallyItems.java:121` → `ActuallyAdditionsAPI.lensDisenchanting`); the brief named no other id here | `ActuallyItems.java:121` |
+| own energy | `ENERGY_USE = 250_000` CF, after the 1,000 CF gate → charge 251,000; `canInvoke` asks `energy - 1000 >= 250000` | `LensDisenchanting.java:20, :78-80` |
+| box | the **hit cell** `AABB(x,y,z,x+1,y+1,z+1)` — no inflation, no `expandTowards` | `LensDisenchanting.java:31` |
+| which entities | one book (`minecraft:book` or `minecraft:enchanted_book`, count 1) and one non-book with non-empty `getTagEnchantments()` (count 1); a second of either is a no-op | `LensDisenchanting.java:32-51` |
+| what moves | `enchants.keySet().iterator().next()` — the **first** enchantment and its level; `ItemUtil.removeEnchantment` removes just that key | `LensDisenchanting.java:55-58`, `ItemUtil.java:63-70` |
+| outcome | the plain book becomes an enchanted book carrying that stored enchantment; the item loses it; both originals are discarded and two new item entities spawned in their place; 250,000 CF spent | `LensDisenchanting.java:59-74` |
+| reach / stop | `getDistance() = 5`; `invoke` returns true **only** on a successful disenchant (false for an empty or unaffordable cell, even a solid sight, so the beam walks on) | `LensDisenchanting.java:63-65, :76`, `MethodHandler.java:292` |
+
+### TDD — the red, verbatim
+
+Four rules were written first (`LENS_OF_DISENCHANTING`, `DISENCHANTING_LENS_ENERGY`, distance,
+`disenchanting_stop`, `disenchant_split`, `LensEffect::Disenchanting` absent),
+`evidence/actuallyadditions/sdk-test-red-disenchant.log`, `cargo test --offline` exit 101:
+
+```text
+error[E0425]: cannot find value `LENS_OF_DISENCHANTING` in this scope
+error[E0425]: cannot find value `DISENCHANTING_LENS_ENERGY` in this scope
+error[E0599]: no variant or associated item named `Disenchanting` found for enum `runtime::LensEffect` in the current scope
+error[E0425]: cannot find function `disenchanting_stop` in this scope
+error[E0425]: cannot find function `disenchant_split` in this scope
+error: could not compile `actuallyadditions` (lib test) due to 13 previous errors
+exit=101
+```
+
+Green after the rules and the glue: **74 passed**, 0 failed (55 `runtime::`, 19 `support::`);
+`Compiling actuallyadditions v0.2.14` in `sdk-test.log`. A clippy `type_complexity` finding on the
+split rule's return type was fixed with a named `SplitEnchantments` alias, not a suppression.
+
+### Glue and content
+
+`support::disenchanting_step` queries the hit cell's `entities_in`, narrows to item entities,
+checks count 1, finds one book and one enchanted item, orders the enchantments for the pure
+`disenchant_split` rule, copies the moved level tag verbatim (so its NBT width is unchanged) into
+the book's `minecraft:stored_enchantments`, removes that key from the item's `minecraft:enchantments`,
+and commits both stack writes through the transactional `Conversion` pattern (`remove_source` →
+`emit_result` → price), which charges 250,000 CF only when both writes succeeded. `fire_beam`
+dispatches `LensEffect::Disenchanting` with its own 5-block reach; `reconstructor_sight` names
+`disenchanting @ 250000 CF`. The dependency-free `Json` reader is untouched (R9 still passes); no
+local type or variant collides with the SDK surface (`fits` green on both builds).
+`lens_of_disenchanting` is carried as the killer was — its `items/` entry, model, texture and
+`.mcmeta`, a `horizon/item` declaration with `max_stack_size: 1` and a creative-tab row. Its craft
+(eight empowered Diamatine Crystals) is not carried and the jar has no `laser/` conversion for it;
+the in-game rig gives the item.
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+### Ladder (cargo steps forwarded to `AdLf-PC`, no `BUILD_LOCAL=1`; launcher build local)
+
+| Step | Result |
+|---|---|
+| tests (red first) | 13 compile errors naming the absent disenchant rules — `sdk-test-red-disenchant.log` |
+| tests | **74 passed**, 0 failed, `Compiling actuallyadditions v0.2.14` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings`, exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check`, exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` — `7 recipe(s), 36 craftable, 0 blocked, 0 failure(s)` — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice — **186,835 B** both, `cmp` identical, sha256 `a27b5aec081b974255f36bd06ffaebcae74ea9db054f648aa6a72a364f94bca5`, **210 entries, no `Cargo.lock`** — `sdk-build-combined-0.2.14.log` |
+| check | `actuallyadditions 0.2.14 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 186,835 bytes, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` → **1/1**, `package matches the tree` — `verify-gate-0.2.14.log` |
+| launcher build | fresh `native-0a875da-39c995531ce8`, `Compiling actuallyadditions (1 of 1)` — `launcher-build-0.2.14.log` |
+
+### In-game transcript (`evidence/actuallyadditions-e2e/e2e-launcher.log`, 0.2.14)
+
+```
+  after the disenchanting-lens click: Atomic Reconstructor at 0,100,82: 0/300000 CF (... lens actuallyadditions:lens_of_disenchanting x1, sight minecraft:stone -> disenchanting @ 250000 CF, ...)
+  the book before the shot: {count: 1, id: "minecraft:book"}
+  the enchanted sword before the shot: {components: {"minecraft:enchantments": {"minecraft:sharpness": 1}}, count: 1, id: "minecraft:diamond_sword"}
+  after the disenchant shot: Atomic Reconstructor at 4,100,82: 0/300000 CF (... lens actuallyadditions:lens_of_disenchanting x1, ...)
+  the book after the shot: {components: {"minecraft:stored_enchantments": {"minecraft:sharpness": 1}}, count: 1, id: "minecraft:book"}
+  the sword after the shot: {count: 1, id: "minecraft:diamond_sword"}
+  the plain lens's shot: Atomic Reconstructor at 10,100,82: 250000/300000 CF (... lens default, ...)
+  the plain lens's book: {count: 1, id: "minecraft:book"}
+  the plain lens's sword: {components: {"minecraft:enchantments": {"minecraft:sharpness": 1}}, count: 1, id: "minecraft:diamond_sword"}
+PASS: ... + EXIT:0
+```
+
+Every assertion can fail and was made to: `SELFTEST=disenchant` flips it to "both unchanged, only
+the gate spent" —
+`FAIL: SELFTEST disenchant: the book gained stored_enchantments and the buffer read 0 (the real assertion); the flipped assertion 'both unchanged, only the gate spent' fails, so the real one can fail`
++ `EXIT:1` (`e2e-launcher-selftest-disenchant.log`). The plain-lens differential is inside the same
+run: its book stays plain, its sword keeps sharpness and it spends only the 1,000 CF gate. The 13
+older legs re-proved green under `--strict` (`logs=14 ok=14`).
+
+### Coverage (slice 13)
+
+| Family | State |
+|---|---|
+| `LensDisenchanting`'s cell-box move | **tested in game** — a 251,000 CF shot moves sharpness from a dropped diamond sword onto a dropped book in the sighted air cell; the book's `minecraft:stored_enchantments` names it, the sword loses it, the buffer reads 0 |
+| the 250,000 CF price and 251,000 CF charge | **tested** — exact price unit-tested (one CF short cannot fire); the default-lens differential keeps 250,000 CF after the same charge |
+| the 5-block reach and stop-on-disenchant | **tested in code + readout** — `LensEffect::Disenchanting.distance() == 5`, `disenchanting_stop(true)`; the `info` sight loop names `disenchanting @ 250000 CF` at a solid sight |
+| first-enchantment-only, the rest stay | **unit-tested** (`disenchant_split`); the in-game rig uses one enchantment, so a multi-enchantment split is not staged in game |
+| the lens's own craft | **not carried** — its eight empowered Diamatine Crystals are worldgen/machine items this package lacks; the rig gives the item, as for the miner/detonator/killer |
+| the GUI, ore generation, comparator, beam visual | unchanged: `blocked(no-single-player-mod-screen)`, `blocked(configured-feature-not-registered)`, printed-not-wired, no packet |
+
+### Upstream defects fixed
+
+**The already-enchanted book lost the moved enchantment.** `LensDisenchanting.java:66-70` makes a
+plain book with `EnchantedBookItem.createForEnchantment(enchant, level)` but, for a book that is
+already `ENCHANTED_BOOK`, only `bookStack.copy()` — the item still loses the enchantment, so it
+vanishes. The port instead adds/overwrites that key in the book's `stored_enchantments` component
+whether or not the book was already enchanted, so the mod's stated mechanic (move the enchantment
+onto the book) holds in both cases. The in-game proof uses a plain book (artefact-true path); the
+merge is a pure component write with no new surface. Worth an upstream report: yes (a two-line fix
+in `LensDisenchanting.invoke`); not filed — the orchestrator decides.
+
+### Deviations and gaps this slice adds
+
+1. **Both item entities are rewritten in place**, not discarded and re-spawned as upstream does. A
+   stack write during a block-entity tick is staged with the tick snapshot (a spawn is immediate),
+   so in-place rewrites cannot duplicate an item if the tick is rejected; the stacks, positions and
+   pickup delays of the two entities are unchanged.
+2. **`ItemEnchantments` is edited through its component tags**, not its handle methods. The pin
+   exposes both the handle and the components, but a mod can only reach a dropped stack's
+   enchantments through `ItemResource::value`/`with_component`; the level tag is copied verbatim so
+   this is byte-equivalent to upstream's `Mutable.removeIf`/`setEnchantments`.
+3. **The lens stays harness-given** (its craft needs crystals this package does not carry), as for
+   the miner, detonator and killer lenses.
+
+### Harness facts measured while getting there
+
+1. `data get entity @e[type=minecraft:item,nbt={Item:{id:"…"}},limit=1,sort=nearest] Item` shows
+   the stack's components (`minecraft:stored_enchantments`, `minecraft:enchantments`) directly;
+   `ctl entities`' `encode_components` omits them, so the component assertions use `data get`.
+2. `ctl select actuallyadditions:lens_of_disenchanting` after a `give` (and four ticks) makes the
+   "harness-given" readout name the right held item; a bare `give` leaves the previously selected
+   killer lens in hand and makes that line misleading.
+3. A backtick-quoted component id in the final `echo "PASS: …"` is executed by bash as a command
+   substitution; the PASS line uses plain text for component ids.
+
+**Changelog (0.2.14):**
+
+> **0.2.14 — the disenchanting lens changes the beam.** The carried `lens_of_disenchanting` selects
+> its own `LensDisenchanting.invoke` rule: after the 1,000 CF gate, a 251,000 CF shot scans the hit
+> cell's item entities for one book and one enchanted item and moves the first enchantment onto the
+> book (`minecraft:stored_enchantments`) while removing it from the item
+> (`minecraft:enchantments`), spending the lens's own 250,000 CF only when both stack writes
+> succeed. It reaches five blocks and stops only when a disenchant happened; the default lens keeps
+> its conversion. An already-enchanted book now receives the moved enchantment instead of losing it
+> (upstream's `copy()`-only branch). 74 unit tests, 14 in-game legs, 210 entries, 186,835 B, sha256
+> `a27b5aec…4bca5`.
+
+## Next slice (0.2.15)
+
+**Family:** wire the **comparator output** of the three machines — upstream's
+`BlockCoalGenerator.getAnalogOutputSignal` (`floor(energy / 60000 * 15)`),
+`BlockCrusher` (the same) and `BlockAtomicReconstructor.getAnalogOutputSignal`
+(`clamp(energy / 20000, 0, 15)`), all currently printed by `/actuallyadditions info` but not exposed
+to a vanilla comparator.
+
+- **Gap line** (slice 12/13 coverage tables): *"the GUI, ore generation, comparator, beam visual —
+  unchanged: … printed-not-wired, no packet"*; the earlier `Deviations and gaps` item 7 says
+  *"no comparator output — `comparator_strength` is computed (and printed), but no
+  `has_analog_output` hook is declared"*.
+- **Why it fits `machines`:** two typed `BlockPart` methods (`has_analog_output`, `analog_output`)
+  on the blocks the port already ships, with the artefact's own formulas already computed in
+  `runtime.rs` — no new block, renderer or recipe.
+- **Surface to check first:** `hook:has_analog_output` / `hook:analog_output` and
+  `BlockPart::{has_analog_output,analog_output}` exist at the pin (`surface.json:519, 19169,
+  52601, 52993`); confirm the event fields and the update-neighbour contract before promising the
+  hook, and stop with `blocked(<symbol>)` if a write is refused.
+- **In-game assertion that can fail:** charge a generator to `info`-readable FE, place a vanilla
+  comparator reading it, and assert the comparator's parsed signal equals the artefact's
+  `floor(FE / 60000 * 15)`; a fresh uncharged machine reads 0, and a comparator reading a plain
+  stone block beside it reads 0 (differential). `SELFTEST=comparator` flips the expected value to
+  `EXIT:1`.

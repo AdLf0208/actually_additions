@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use mod_api::{
     self, BiomeModifier, BiomeModifierOperation, BlockClick, BlockDropsEvent, BlockEntityEvent,
     BlockEntityPart, BlockEntityTickEvent, BlockEntityTickReply, BlockEntityTicksEvent, BlockPart,
-    BlockState, BlockUpdateFlags, Command, CommandArgumentValue, Compound, ENERGY,
+    BlockState, BlockUpdateFlags, Command, CommandArgumentValue, ComponentId, Compound, ENERGY,
     ExplosionInteraction, ExplosionSettings, Flow, Host, HostTransaction, Identifier, Ingredient,
     InteractionResult, ItemKey, ItemPart, ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef,
     LevelSide, ModContainer, ModEnergyBuffer, OnBlockPlacedByEvent, RandomSource, Registrar,
@@ -23,14 +23,14 @@ use mod_api::{
 
 use crate::runtime::{
     CONVERTED_MARKER, CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, Conversion, CrushResult,
-    Crusher, CrushingRecipe, DETONATION_BLAST_RADIUS, DETONATION_LENS_ENERGY, GENERATOR_CAPACITY,
-    GENERATOR_MAX_EXTRACT, Generator, KILLER_DAMAGE, KILLER_LENS_ENERGY, LaserRecipe, LensEffect,
-    MINING_LENS_ENERGY, MiningLensRecipe, RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_MAX_INSERT,
-    RECONSTRUCTOR_TICKS, Reconstructor, Signal, Step, bonus_for, can_crush, clamp_energy,
-    comparator_strength, conversion_plane, convert, detonation_stop, facing_for_placement, is_fuel,
-    is_lens, item_scan_box, items_possible, killer_stop, lens_slot_accepts, may_convert,
-    pick_weighted, reconstructor_comparator, restored_crusher, restored_generator,
-    restored_reconstructor,
+    Crusher, CrushingRecipe, DETONATION_BLAST_RADIUS, DETONATION_LENS_ENERGY,
+    DISENCHANTING_LENS_ENERGY, GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, KILLER_DAMAGE,
+    KILLER_LENS_ENERGY, LaserRecipe, LensEffect, MINING_LENS_ENERGY, MiningLensRecipe,
+    RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_MAX_INSERT, RECONSTRUCTOR_TICKS, Reconstructor, Signal,
+    Step, bonus_for, can_crush, clamp_energy, comparator_strength, conversion_plane, convert,
+    detonation_stop, disenchant_split, disenchanting_stop, facing_for_placement, is_fuel, is_lens,
+    item_scan_box, items_possible, killer_stop, lens_slot_accepts, may_convert, pick_weighted,
+    reconstructor_comparator, restored_crusher, restored_generator, restored_reconstructor,
 };
 
 /// The generator block; its block entity type carries the same path.
@@ -821,6 +821,7 @@ fn fire_beam(
             LensEffect::Mining => mining_step(host, level, hit, state),
             LensEffect::Detonation => detonation_step(host, level, hit, state),
             LensEffect::Killer => killer_step(host, level, hit, state),
+            LensEffect::Disenchanting => disenchanting_step(host, level, hit, state),
         };
         if solid || distance == effect.distance() {
             break;
@@ -931,6 +932,196 @@ fn killer_step(
         let _ = fake.remove_fake(&mut *host);
     }
     killer_stop(air)
+}
+
+/// The two 26.3 data components the disenchanting lens edits. `minecraft:enchantments` is a stack's
+/// applied enchantments; `minecraft:stored_enchantments` is what makes a book an enchanted book.
+/// Both use the same `ItemEnchantments` compound shape (enchantment id → level).
+fn enchantments_component() -> ComponentId {
+    ComponentId::new("minecraft:enchantments").expect("a namespaced component id")
+}
+
+fn stored_enchantments_component() -> ComponentId {
+    ComponentId::new("minecraft:stored_enchantments").expect("a namespaced component id")
+}
+
+/// The enchantments compound on a stack, or `None` when it has none (the effective value is an
+/// absent or empty component). The compound's keys are the enchantment ids in order.
+fn enchantment_map(host: &dyn Host, stack: &ItemStack, id: &ComponentId) -> Option<Compound> {
+    match ItemResource::of(stack).value(host, id)? {
+        Tag::Compound(map) if !map.is_empty() => Some(map),
+        _ => None,
+    }
+}
+
+/// The level tag as an int, used only to order the compound for the pure first-enchantment rule;
+/// the level tag itself is copied into the book so its NBT width is unchanged.
+fn tag_level(tag: &Tag) -> i32 {
+    match tag {
+        Tag::Byte(value) => i32::from(*value),
+        Tag::Short(value) => i32::from(*value),
+        Tag::Int(value) => *value,
+        Tag::Long(value) => *value as i32,
+        _ => 0,
+    }
+}
+
+/// `LensDisenchanting.invoke` at one beam step: the **hit cell's** `AABB(x,y,z,x+1,y+1,z+1)` (no
+/// inflation, no `expandTowards`) must hold exactly one book (`minecraft:book` or
+/// `minecraft:enchanted_book`, count 1) and one enchanted non-book item (count 1). The first
+/// enchantment in `ItemEnchantments` order moves onto the book — a plain book becomes an enchanted
+/// book carrying it — and is removed from the item; 250,000 CF is spent only then. Any other cell
+/// returns false, so the beam walks on even through a solid sight (upstream's `invoke` returns
+/// false unless a disenchant happened).
+fn disenchanting_step(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    hit: [i32; 3],
+    state: &mut Reconstructor,
+) -> bool {
+    if !state.can_afford(DISENCHANTING_LENS_ENERGY) {
+        return disenchanting_stop(false);
+    }
+    let min = [f64::from(hit[0]), f64::from(hit[1]), f64::from(hit[2])];
+    let max = [min[0] + 1.0, min[1] + 1.0, min[2] + 1.0];
+    let Some(entities) = level.entities_in(&*host, min, max) else {
+        return disenchanting_stop(false);
+    };
+    let ench_id = enchantments_component();
+    let stored_id = stored_enchantments_component();
+    let mut book: Option<(mod_api::ItemEntityRef, ItemStack)> = None;
+    let mut source: Option<(mod_api::ItemEntityRef, ItemStack, Compound)> = None;
+    for entity in entities {
+        let Some(item) = host.item_entity(entity) else {
+            continue;
+        };
+        let Some(stack) = item.stack(&*host) else {
+            continue;
+        };
+        if stack.count() != 1 {
+            continue;
+        }
+        let id = stack.item().id(&*host);
+        if matches!(id.as_str(), "minecraft:book" | "minecraft:enchanted_book") {
+            if book.is_some() {
+                return disenchanting_stop(false);
+            }
+            book = Some((item, stack));
+            continue;
+        }
+        let Some(map) = enchantment_map(&*host, &stack, &ench_id) else {
+            continue;
+        };
+        if source.is_some() {
+            return disenchanting_stop(false);
+        }
+        source = Some((item, stack, map));
+    }
+    let (Some((book_item, book_stack)), Some((source_item, source_stack, enchants))) =
+        (book, source)
+    else {
+        return disenchanting_stop(false);
+    };
+
+    // Order the compound for the pure rule (it is a BTreeMap, so already ascending by id). The
+    // rule decides which enchantment moves; the level tag is then read from the original compound
+    // so its NBT width is preserved byte for byte on the book.
+    let pairs: Vec<(String, i32)> = enchants
+        .iter()
+        .map(|(id, level)| (id.to_string_lossy(), tag_level(level)))
+        .collect();
+    let Some(((moved_id, _), _)) = disenchant_split(&pairs) else {
+        return disenchanting_stop(false);
+    };
+    // `Compound`'s key type is not exported, so take the JavaString from a string tag's payload
+    // (the same conversion the port's other NBT helpers use).
+    let Tag::String(moved_key) = key_tag(moved_id.as_str()) else {
+        return disenchanting_stop(false);
+    };
+    let Some(moved_level) = enchants.get(&moved_key).cloned() else {
+        return disenchanting_stop(false);
+    };
+
+    let mut remaining = enchants.clone();
+    remaining.remove(&moved_key);
+    let Some(new_source) = ItemResource::of(&source_stack)
+        .with_component(&*host, &ench_id, Tag::Compound(remaining))
+        .ok()
+        .and_then(|resource| resource.to_stack(1))
+    else {
+        return disenchanting_stop(false);
+    };
+
+    let mut stored = enchantment_map(&*host, &book_stack, &stored_id).unwrap_or_default();
+    stored.insert(moved_key, moved_level);
+    let Some(new_book) = ItemResource::of(&book_stack)
+        .with_component(&*host, &stored_id, Tag::Compound(stored))
+        .ok()
+        .and_then(|resource| resource.to_stack(1))
+    else {
+        return disenchanting_stop(false);
+    };
+
+    let mut conversion = DisenchantConversion {
+        host,
+        book_item,
+        book_original: book_stack,
+        book_new: new_book,
+        source_item,
+        source_original: source_stack,
+        source_new: new_source,
+    };
+    disenchanting_stop(convert(&mut conversion, DISENCHANTING_LENS_ENERGY, state))
+}
+
+/// The two item-entity stack writes of one disenchant, ordered by [`convert`]: the book and the
+/// item are rewritten in place (upstream discards both and spawns fresh entities; the pin stages a
+/// stack write with the block entity's tick snapshot, so in-place rewrites cannot duplicate an
+/// item). A refused second write restores the first before the whole conversion is abandoned.
+struct DisenchantConversion<'a> {
+    host: &'a mut dyn ServerHost,
+    book_item: mod_api::ItemEntityRef,
+    book_original: ItemStack,
+    book_new: ItemStack,
+    source_item: mod_api::ItemEntityRef,
+    source_original: ItemStack,
+    source_new: ItemStack,
+}
+
+impl Conversion for DisenchantConversion<'_> {
+    fn remove_source(&mut self) -> bool {
+        if !self
+            .book_item
+            .set_stack(&mut *self.host, self.book_new.clone())
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        if !self
+            .source_item
+            .set_stack(&mut *self.host, self.source_new.clone())
+            .unwrap_or(false)
+        {
+            let _ = self
+                .book_item
+                .set_stack(&mut *self.host, self.book_original.clone());
+            return false;
+        }
+        true
+    }
+
+    fn emit_result(&mut self) -> bool {
+        true // both stacks already hold the result
+    }
+
+    fn restore_source(&mut self) {
+        let _ = self
+            .book_item
+            .set_stack(&mut *self.host, self.book_original.clone());
+        let _ = self
+            .source_item
+            .set_stack(&mut *self.host, self.source_original.clone());
+    }
 }
 
 /// `LensMining.invoke` at one beam step: the sighted block (not the 3x3 plane) is swapped for a
@@ -1902,6 +2093,9 @@ fn reconstructor_sight(
             }
             LensEffect::Killer => {
                 format!("{block} -> killer @ {KILLER_LENS_ENERGY} CF")
+            }
+            LensEffect::Disenchanting => {
+                format!("{block} -> disenchanting @ {DISENCHANTING_LENS_ENERGY} CF")
             }
         };
     }
