@@ -1116,35 +1116,63 @@ pub const MINING_LENS_DISTANCE: i32 = 10;
 /// gives the item; the item itself is in the jar and is an `ILensItem`, so the slot accepts it.
 pub const LENS_OF_THE_MINER: &str = "actuallyadditions:lens_of_the_miner";
 
+/// `LensDetonation.ENERGY_USE` (`LensDetonation.java:22`): the CF the blast costs **on top of**
+/// the shot's 1,000 CF gate, so a shot needs 251,000 CF in the buffer.
+pub const DETONATION_LENS_ENERGY: i32 = 250_000;
+
+/// The radius passed to `explode(null, hit + 0.5, 10F, true, ExplosionInteraction.NONE)`
+/// (`LensDetonation.java:28`). The beam's reach is separate: [`LensEffect::Detonation`] travels 30.
+pub const DETONATION_BLAST_RADIUS: f32 = 10.0;
+
+/// The behaviour lens whose `ItemLens.getLens()` is upstream's `LensDetonation`. Its own craft
+/// keys on crystals this package does not carry, so the in-game rig gives it; the jar's item is
+/// an `ILensItem` already carried by the package, so the slot accepts it.
+pub const LENS_OF_DETONATION: &str = "actuallyadditions:lens_of_detonation";
+
+/// `LensDetonation.invoke` returns `true` for any non-air sight (so the beam stops even if it
+/// cannot pay) and `false` for air (so it keeps walking). Upstream's near-null case is the same
+/// "keep walking" answer — the beam always calls `invoke` with a positioned block.
+#[must_use]
+pub fn detonation_stop(air: bool) -> bool {
+    !air
+}
+
 /// Which `Lens.invoke` a held lens item selects (`TileEntityAtomicReconstructor.getLens` →
-/// `MethodHandler.invokeReconstructor`). Only the miner's own rule is carried in this slice; the
-/// three other behaviour lenses are distinct `invoke` paths and are recorded as gaps.
+/// `MethodHandler.invokeReconstructor`). The miner, detonator, killer and disenchanting lenses are
+/// distinct `invoke` paths; the first two are carried, the others recorded as gaps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LensEffect {
     /// `LensConversion`: the default conversion of the plane and the beam's dropped items.
     Conversion,
     /// `LensMining`: replace the sighted ore-replaceable block with a weighted-random ore.
     Mining,
+    /// `LensDetonation`: a sourceless, fiery radius-10 blast at the sighted block.
+    Detonation,
 }
 
 impl LensEffect {
     /// The rule a held lens item selects; an empty slot (no id) is upstream's `lensDefaultConversion`.
     pub fn of(item: &str) -> Self {
-        if item == LENS_OF_THE_MINER {
-            Self::Mining
-        } else {
-            Self::Conversion
+        match item {
+            LENS_OF_THE_MINER => Self::Mining,
+            LENS_OF_DETONATION => Self::Detonation,
+            _ => Self::Conversion,
         }
     }
 
-    /// Upstream `Lens.getDistance`: both the default conversion lens and the miner reach ten blocks.
+    /// Upstream `Lens.getDistance`: the default conversion lens and the miner reach ten blocks;
+    /// `LensDetonation.getDistance` returns thirty (three times as far).
     pub fn distance(self) -> i32 {
         match self {
             Self::Conversion => RECONSTRUCTOR_LENS_DISTANCE,
             Self::Mining => MINING_LENS_DISTANCE,
+            Self::Detonation => DETONATION_LENS_DISTANCE,
         }
     }
 }
+
+/// `LensDetonation.getDistance` — three times the default conversion lens's ten blocks.
+pub const DETONATION_LENS_DISTANCE: i32 = 30;
 
 /// What a placed reconstructor comes back with: its buffer clamped and its cycle inside the
 /// machine's own range (a stale item can name any int).
@@ -2053,6 +2081,74 @@ mod reconstructor_tests {
             )
             .is_err(),
             "a recipe with no weight is refused"
+        );
+    }
+
+    #[test]
+    fn a_detonation_lens_is_accepted_by_the_slot_and_selects_the_detonation_effect() {
+        assert!(
+            lens_slot_accepts(None, LENS_OF_DETONATION),
+            "the detonator lens is an ILensItem, so the empty slot accepts it"
+        );
+        assert_eq!(
+            LensEffect::of(LENS_OF_DETONATION),
+            LensEffect::Detonation,
+            "its getLens() is LensDetonation, not the default conversion"
+        );
+        assert_eq!(
+            LensEffect::of("actuallyadditions:lens"),
+            LensEffect::Conversion,
+            "the plain lens keeps the default conversion"
+        );
+    }
+
+    #[test]
+    fn the_detonation_costs_two_hundred_and_fifty_thousand_cf_and_reaches_thirty_blocks() {
+        assert_eq!(
+            DETONATION_LENS_ENERGY, 250_000,
+            "LensDetonation.ENERGY_USE, on top of the shot's 1,000 CF gate"
+        );
+        assert_eq!(DETONATION_BLAST_RADIUS, 10.0, "explode's radius argument");
+        assert_eq!(
+            LensEffect::Detonation.distance(),
+            30,
+            "LensDetonation.getDistance, three times the default lens"
+        );
+        let mut state = Reconstructor {
+            energy: 251_000,
+            ..Reconstructor::new()
+        };
+        assert_eq!(
+            state.fire(),
+            Some(250_000),
+            "the 1,000 CF shot gate is paid before the lens's invoke"
+        );
+        assert!(
+            state.can_afford(DETONATION_LENS_ENERGY),
+            "the gate leaves the detonator's own 250,000 CF"
+        );
+        state.spend(DETONATION_LENS_ENERGY);
+        assert_eq!(state.energy, 0, "the blast's own energy is charged");
+        let mut short = Reconstructor {
+            energy: 250_999,
+            ..Reconstructor::new()
+        };
+        assert_eq!(short.fire(), Some(249_999));
+        assert!(
+            !short.can_afford(DETONATION_LENS_ENERGY),
+            "251,000 CF total is the exact price: one CF short cannot fire"
+        );
+    }
+
+    #[test]
+    fn the_detonation_stops_at_a_solid_sight_and_lets_air_pass() {
+        assert!(
+            detonation_stop(false),
+            "invoke returns true for a non-air block, even when nothing matched"
+        );
+        assert!(
+            !detonation_stop(true),
+            "an air sight returns false, so the beam keeps walking"
         );
     }
 }

@@ -2716,3 +2716,186 @@ game, record that its craft is unreachable).
   the same block with the same charge, whose stone stays and whose buffer keeps 250,000 CF.
 - **Out of scope:** the miner (shipped), the GUI (`blocked(no-single-player-mod-screen)`), the ore's
   generation (`blocked(configured-feature-not-registered)`), the beam's visual.
+
+
+## Slice 11 (0.2.12, 2026-11-24) — the detonator lens's own beam effect
+
+**Family:** `LensDetonation.invoke` — the second behaviour lens's own rule path: a sourceless
+radius-10 blast at the sighted block, paid for with the lens's own 250,000 CF on top of the shot's
+1,000 CF gate. The lens item (`actuallyadditions:lens_of_detonation`) already ships as part of the
+jar's lens ring (0.2.10), and the lens slot accepts it (0.2.10's `is_lens`); this slice adds the
+`LensEffect::Detonation` branch, the blast and its readout.
+
+- **Gap line** (0.2.11 coverage table): *"the killer, detonator and disenchanting lens effects —
+  not ported (next slice; distinct rule paths) — damage (`EntityRef::hurt`), explosion
+  (`LevelRef::explode`) and item-enchantment edits (`ItemEnchantments`) are separate `Lens.invoke`
+  implementations with their own energies and boxes"*.
+- **Why it fits `machines`:** one more branch in the beam the port already ships, driven by the
+  lens id in the slot it already accepts — no new block, renderer or hook kind; the pin's
+  `LevelRef::explode` is a measured surface, so nothing is `blocked(...)`.
+
+### The artefact, not the brief (`cd9d9c63`, `LensDetonation.java:20-49`)
+
+| Rule | Value | Source |
+|---|---|---|
+| own energy | `ENERGY_USE = 250000` CF, after the shot's 1,000 CF gate → **251,000 CF** total | `:22`, `:29` |
+| blast | `explode(null, hit+0.5, 10F, true, Level.ExplosionInteraction.NONE)` | `:28` |
+| source | `null` → pin `Option<EntityRef> = None`, expressible; no blocker | `surface.json`, `handle:LevelRef::explode` |
+| interaction | **`NONE`** — pin: *"Blocks stay; entities are hurt and pushed (`NONE`)"* (`native_explosions.rs::NativeBlast::Keep`, `world/types.rs::ExplosionInteraction`) | `:28`, pin docs |
+| fire | `true` — the engine still lights air over solid blocks among the blast's rays under `Keep` | `explosion.rs` |
+| reach / stop | `getDistance() = 30` (3× the default lens); `invoke` returns `true` at any non-air sight (even if it cannot pay), `false` for air | `:31-34`, `:43-48` |
+| gate | `canInvoke`: `energy - energyUsePerShot >= 250000` | `:47-49` |
+
+**The brief's in-game assertion was not artefact-true.** It asked for the stone and its neighbours
+to be gone (a crater) at the artefact's radius. The artefact passes
+`ExplosionInteraction.NONE`, which **keeps blocks** at this pin — exactly as the port's own 0.2.12
+next-slice note recorded. The campaign rule "when a brief and the artefact disagree, the artefact
+wins" applies here just as it did to the miner's 61,000 CF: the port uses the real `explode` with
+the artefact's own `NONE`, and the e2e proves the blast by the 250,000 CF it spends and the fire it
+lights, while asserting the sighted stone stays. A plain `set_block` break would have been the
+wrong substitute; no `blocked(<symbol>)` is needed because the pin expresses the real explosion.
+
+### TDD — the red, verbatim
+
+Three rules were written first (constants, `LensEffect::Detonation`, `detonation_stop` absent),
+`evidence/actuallyadditions/sdk-test-red-detonation.log`, `cargo test --offline` exit 101:
+
+```text
+error[E0425]: cannot find value `LENS_OF_DETONATION` in this scope
+error[E0425]: cannot find value `DETONATION_LENS_ENERGY` in this scope
+error[E0599]: no variant or associated item named `Detonation` found for enum `runtime::LensEffect` in the current scope
+error[E0425]: cannot find function `detonation_stop` in this scope
+exit=101
+```
+
+Green: **67 passed**, 0 failed (48 `runtime::` incl. 4 json and 3 detonator rules, 19 `support::`);
+`Compiling actuallyadditions v0.2.12` in `sdk-test.log`.
+
+### Glue
+
+`support::detonation_step` builds the centre from the sighted block (`hit + 0.5` on each axis),
+calls `level.explode(host, None, centre, 10.0, true, ExplosionInteraction::None,
+ExplosionSettings::default())`, and spends the lens's 250,000 CF only when the blast returned
+`Ok(())` — a refused blast (a parked level or unloaded chunk) must not silently eat the buffer.
+`fire_beam` dispatches `LensEffect::Detonation` to it; the beam's reach becomes the lens's own 30.
+`/actuallyadditions info` names the price (`sight minecraft:stone -> detonation @ 250000 CF`), and
+its sight loop now walks the lens's distance too, so a detonator can name a block ten-plus away.
+The dependency-free `Json` reader is untouched; R9 still passes (`SDK-only dependencies`, `no
+packed Cargo.lock`). No local type collided with the SDK surface, so both `fits` runs were green on
+the first attempt.
+
+### Ladder (0.2.12, cargo steps forwarded to `AdLf-PC`; launcher build local)
+
+The launcher's `native-build` had to run in a **local** build slot: the far box lacks
+`libxkbcommon-x11.so.0`, so a forwarded launcher install dies before compiling. The Rust ladder
+had no such problem and stayed forwarded (no `BUILD_LOCAL=1` for cargo).
+
+| Step | Result |
+|---|---|
+| tests (red first) | 10 compile errors naming the absent detonator rules — `sdk-test-red-detonation.log` |
+| tests | **67 passed**, 0 failed, `Compiling actuallyadditions v0.2.12` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings`, exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check`, exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` — `7 recipe(s), 36 craftable, 0 blocked, 0 failure(s)` — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice — **177,060 B** both, `cmp` identical, sha256 `abafd007…6249a57`, **201 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `actuallyadditions 0.2.12 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 177,060 bytes, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` → **1/1**, `package matches the tree` — `verify-gate-0.2.12.log` |
+| launcher build | `native-0a875da-301e07058952`, `Compiling actuallyadditions (1 of 1)` — `launcher-build-0.2.12.log` |
+
+### In-game transcript (`evidence/actuallyadditions-e2e/e2e-launcher.log`, 0.2.12)
+
+```text
+== the detonator lens's own beam effect (0.2.12) ==
+  the detonator lens is harness-given (its craft needs crystals this package lacks): "actuallyadditions:lens_of_detonation"
+  after the detonator-lens click: Atomic Reconstructor at 0,100,60: … lens actuallyadditions:lens_of_detonation x1, sight minecraft:stone -> detonation @ 250000 CF, t=8381
+  after the detonation shot: Atomic Reconstructor at 0,100,60: 0/300000 CF (… sight minecraft:fire -> detonation @ 250000 CF, t=8434)
+  the sighted block after the shot: minecraft:stone
+  fire in the blast box before and after: 0 -> 53
+  the sighted stone stayed (the artefact's ExplosionInteraction.NONE keeps blocks)
+  the plain lens's shot: Atomic Reconstructor at 14,100,60: 250000/300000 CF (… lens default, sight minecraft:stone -> nothing, t=8582)
+  the plain lens's fire before and after: 53 -> 53
+  the plain lens's sighted block: minecraft:stone
+```
+
+Every assertion can fail and was made to: `SELFTEST=detonation` flips it to "nothing spent, no
+fire", which this package makes false — `FAIL: SELFTEST detonation: the shot spent 250000 CF and
+lit 50 fire block(s) (the real assertion); the flipped assertion 'nothing happened' fails, so the
+real one can fail` + `EXIT:1` (`e2e-launcher-selftest-detonation.log`). The differential machine
+with the default lens keeps its 250,000 CF, lights no fire and keeps its stone. The 11 earlier legs
+are unchanged and re-proved in the same run.
+
+### Coverage (slice 11)
+
+| Family | State |
+|---|---|
+| `LensDetonation.invoke`'s blast | **tested** — a harness-given detonator lens in the slot makes a 251,000 CF shot set off the pin's real sourceless radius-10 blast: 250,000 CF spent (buffer 0), 53 fire blocks lit in the arena, sighted stone stays because the artefact passes `NONE` |
+| the 250,000 CF price and the 251,000 CF charge | **tested** — exact price unit-tested (one CF short cannot fire); the differential's default lens keeps 250,000 CF after the same charge |
+| the 30-block reach | **tested in code + readout** — `LensEffect::Detonation.distance() == 30` and the info sight loop walks the lens's distance; an in-game 20+-block sight is not separately staged (the arena is 30 wide) |
+| stop on a non-air sight | **unit-tested** — `detonation_stop(false)` is true; the in-game sight reads `minecraft:fire -> detonation …` after the shot, so the beam stopped at the first solid |
+| fire / entity effects of `NONE` | **tested for fire** — `ctl blocks` counts the blast's fire (0 → 53); entity damage is the same engine call and is not separately staged |
+| the lens's own craft | **not carried** — it keys on crystals this package does not have; the in-game rig gives the item and says so |
+| the killer and disenchanting lens effects | **not ported (next slice; distinct rule paths)** — `EntityRef::hurt` and item-enchantment edits, each with its own energy and box; both surfaces exist at this pin |
+| the GUI, ore generation, comparator, beam visual | unchanged: `blocked(no-single-player-mod-screen)`, `blocked(configured-feature-not-registered)`, printed-not-wired, no packet |
+
+### Deviations and gaps this slice adds
+
+1. **Upstream's blast keeps blocks.** `ExplosionInteraction.NONE` is what the artefact passes; at
+   this pin it means no block breaks. The booklet's "fiery explosion around the block the laser
+   hits" is consistent with the fire the blast lights. A crater would need `Block`, which the
+   artefact does not ask for and which would be a different mod. The upstream line even has a
+   `// TODO: [port][test] make sure this is the right explosion mode` comment — if a later
+   upstream fix changes `NONE` to `BLOCK`, the e2e's "stone stays" assertion is the signal to
+   update both.
+2. **The blast's `Result` is honoured.** Upstream ignores `explode`'s return; the port charges the
+   250,000 CF only when the engine confirms a blast, so a refused one (unloaded chunk) is not paid
+   for. No observable difference in a loaded world.
+3. The lens's own craft stays unreachable (harness-given), as for the miner (0.2.11).
+
+### Harness facts measured while getting there
+
+1. **The forwarded launcher build cannot run on the far box** (`libxkbcommon-x11.so.0` missing);
+   the Rust ladder still forwards. Use a local slot only for `launcher-game.sh build`.
+2. **`ctl blocks X1 Y1 Z1 X2 Y2 Z2` returns `counts` per block id** (max 32,768 cells); it is the
+   right readout for a blast's scattered fire — `ctl block` probes one cell and would miss it.
+3. **A radius-10 `NONE` blast lit 50–53 fire blocks in the stone-floored arena** (two runs), so a
+   count > 0 is a robust assertion; count the same box before and after for the differential.
+
+Skills: superpowers/using-superpowers,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+**Changelog (0.2.12):**
+
+> **0.2.12 — the detonator lens changes the beam.** The jar's detonator lens (already carried) now
+> selects its own `LensDetonation.invoke` rule: after the 1,000 CF shot gate, a 251,000 CF shot's
+> beam sets off a sourceless radius-10, `fire=true`, `ExplosionInteraction.NONE` blast at the block
+> it sights and spends the lens's 250,000 CF, reaching thirty blocks instead of ten. `NONE` keeps
+> blocks at this pin — the brief's crater was not artefact-true — so the in-game leg proves the
+> blast by its fire (0 → 53 cells) and its energy spend, and asserts the stone stays; the
+> default-lens differential keeps its 250,000 CF and lights no fire. 67 unit tests, 12 in-game
+> legs, 201 entries, 177,060 B, sha256 `abafd007…6249a57`.
+
+## Next slice (0.2.13)
+
+**Family:** the **killer lens's own beam effect** — `LensKiller extends LensDeath`, the remaining
+behaviour lens whose rule the port can prove with a mob in a beam box. Artefact facts read from
+`cd9d9c63` (`LensKiller.java`, `LensDeath.java`): **2,500 CF per entity** (`getUsePerEntity`), damage
+**20** through `playerAttack(FakePlayer…)`, a box of exactly the hit block's cell
+(`AABB(hit.x, hit.y, hit.z, hit.x+1, hit.y+1, hit.z+1)`), `getDistance() = 15`, and stop on a
+non-air sight (`return !hitState.isAir()`). Charge **3,500 CF** (1,000 gate + 2,500).
+
+- **Gap line** (this slice's coverage table): *"the killer and disenchanting lens effects — not
+  ported (next slice; distinct rule paths) — `EntityRef::hurt` and item-enchantment edits, each
+  with its own energy and box; both surfaces exist at this pin"*.
+- **Why it fits `machines`:** one more `LensEffect` branch driven by the lens id in the slot the
+  port already accepts; no new block, renderer or hook kind. The pin's `EntityRef::hurt` is a
+  measured surface — grep the SDK before promising the fake-player damage source; if only a plain
+  damage type is expressible, state the difference instead of guessing.
+- **In-game assertion that can fail:** summon a passive mob (e.g. a cow) standing in the block the
+  beam sights, install the harness-given killer lens, charge 3,500 CF, fire one shot, and assert
+  with `ctl entities <radius> cow` that the cow is gone (20 damage kills it) while the buffer
+  reads 0; the differential is a fresh default-lens machine at the same block with the same charge,
+  whose cow survives and whose buffer keeps 2,500 CF. `SELFTEST=killer` inverts it to `EXIT:1`.
+- **Check first:** the killer lens's own craft needs crystals this package lacks, so give the item
+  as for the miner and detonator. Out of scope: the disenchanting lens (its book + enchanted-item
+  box is a separate rule at 250,000 CF), the GUI, the Double Crusher, the ore's generation.

@@ -1,8 +1,8 @@
-# Actually Additions → Horizon (slices 1–10)
+# Actually Additions → Horizon (slices 1–11)
 
 The **Coal Generator**, the **Crusher** and the **Atomic Reconstructor** of Actually Additions
 1.3.26 (`Ellpeck/ActuallyAdditions`, **MIT**) as one flat SDK package (mod API `0.2`, version
-`0.2.11`), built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` and
+`0.2.12`), built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` and
 mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` for Minecraft 26.3.
 
 - [`FINDINGS.md`](FINDINGS.md) — upstream behaviour read from the source, the slice boundary and
@@ -46,12 +46,13 @@ mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` for Minecraft 26.3.
 | Redstone mode | `isPulseMode`: a rising edge of `getBestNeighborSignal` fires one shot, and the cycle never free-runs; a click with the config's `redstoneConfigurator` (default a redstone torch) toggles it, and the mode travels on the broken item | the same: a `pulse on/off` field in the `/actuallyadditions info` line, one shot per rising edge, the cycle frozen in pulse mode, the flag in the drop's payload |
 | Lens slot | `getLens()` takes an `ILensItem` from the reconstructor's one slot; an occupied slot refuses a second lens, and the four lenses form a 5,000 CF laser ring | the four ring items, their recipe and the `c:glass_blocks` tag ship; a right click fills the slot (the `info` line names it), a non-lens and a second lens are refused, and a dropped lens converts to the next one |
 | Miner lens | `LensMining.invoke` spends 60,000 CF to swap the sighted `stone_ore_replaceables` block for a weighted-random ore from `actuallyadditions:mining_lens`, then stops the beam | the miner item, the 20 top-level `mining_lens` recipes and their tags ship; with it installed a 61,000 CF shot replaces the sighted stone (the default lens keeps it and spends only the gate). Its own craft needs crystals this package lacks, so the in-game rig **gives** the item |
+| Detonator lens | `LensDetonation.invoke` spends 250,000 CF on a sourceless radius-10, `fire=true`, `ExplosionInteraction.NONE` blast at the sighted block, reaches 30 blocks and stops at any non-air sight | the jar's lens item and the `LensEffect::Detonation` branch ship: a 251,000 CF shot sets off the real `LevelRef::explode` (and lights fire) and empties the buffer. `NONE` **keeps blocks at this pin**, so the stone stays — the brief's proposed crater is not artefact-true. The lens's own craft needs crystals this package lacks, so the rig **gives** it |
 
 Not ported, and recorded as gaps in [`notes.md`](notes.md): the GUI
 (`blocked(no-single-player-mod-screen)`), the Double Crusher and the other ~44 machines, the rest of
 redstone control (only the reconstructor toggles; the generator and the crusher do not), a
-relay/cable, the Empowerer and the empowered crystals, the killer/detonator/disenchanting lenses'
-own beam effects (distinct `invoke` rule paths — damage, explosion and item-enchantment edits — each
+relay/cable, the Empowerer and the empowered crystals, the killer/disenchanting lenses'
+own beam effects (distinct `invoke` rule paths — damage and item-enchantment edits — each
 needs its own slice; their surfaces exist at this pin), the ore's generation
 (`blocked(configured-feature-not-registered)`), the booklet,
 `lit`/particles.
@@ -59,7 +60,7 @@ needs its own slice; their surfaces exist at this pin), the ore's generation
 ## Quick checks
 
 ```sh
-cargo test --offline                                       # 64 tests: 45 runtime (19 + 4 json + 22 reconstructor incl. the miner lens), 19 glue
+cargo test --offline                                       # 67 tests: 48 runtime (19 + 4 json + 25 reconstructor incl. the detonator lens), 19 glue
 cargo clippy --all-targets --offline -- -D warnings         # 0 warnings
 cargo fmt --check                                          # not --all: that checks the fetched SDK
 rm -f Cargo.lock && cargo horizon-mod build                # no lock in the tree: the registry packs none (R9)
@@ -69,7 +70,7 @@ cargo horizon-mod fits actuallyadditions.hmod --build 0b14f8a   # a different bu
 python3 tools/check_recipe_keys.py                          # every recipe key resolves, or is a recorded blocker
 ports/tools/launcher-game.sh build actuallyadditions        # the launcher compiles the package into a game
 eval "$(ports/tools/launcher-game.sh env actuallyadditions)" && tools/e2e.sh
-                # SELFTEST=1, drops, ore, laser, item, pulse, lens, lens-effect and NEGATIVE=1 must fail
+                # SELFTEST=1, drops, ore, laser, item, pulse, lens, lens-effect, detonation and NEGATIVE=1 must fail
 ```
 
 Local-only until the maintainer approves publishing (ARCHITECTURE.md §8); the artifact goes to a

@@ -85,6 +85,12 @@
 #    (1,000 gate + the lens's 60,000) replaces it with one of the nine mining-lens ores, read back
 #    with `ctl block`, while a fresh machine with the default lens keeps its stone and spends only
 #    the 1,000 CF gate;
+#  - (0.2.12) the detonator lens's own beam effect: the harness-given detonator lens fills the slot
+#    and the readout names its 250,000 CF price; a 251,000 CF shot sets off the real sourceless
+#    radius-10 blast (`fire=true`), spending 250,000 CF and lighting fire in the arena, while the
+#    sighted stone STAYS — upstream's `ExplosionInteraction.NONE` keeps blocks at this pin, so the
+#    brief's proposed crater is not artefact-true. The default-lens differential keeps 250,000 CF,
+#    starts no fire and keeps its stone;
 #  - with CONTROL_GAME set, an unmodded game on the same scratch home knows neither id
 #    (`setblock` answers `Unknown block type`), so the ids are the package's.
 #
@@ -98,12 +104,14 @@
 # flips the pulse phase's first assertion ("a rising edge fires nothing"), which the toggle makes
 # false, so it must fail; SELFTEST=lens flips the lens-slot assertion ("the slot stays empty"), which
 # the right-click makes false, so it must fail too; SELFTEST=lens-effect flips the miner assertion
-# ("the stone stays"), which the 60,000 CF ore swap makes false. NEGATIVE=1 flips the crafting phase's recipe-book
+# ("the stone stays"), which the 60,000 CF ore swap makes false; SELFTEST=detonation flips the
+# blast assertion ("nothing was spent and no fire was lit"), which the 250,000 CF blast makes
+# false. NEGATIVE=1 flips the crafting phase's recipe-book
 # assertion ("the Coal Generator's recipe is not unlocked"), which is the pre-0.2.4 state, so it must
 # fail on this package.
 #
 #   GAME=<launcher-built horizon-client> [CTL=<horizon-ctl>] [CONTROL_GAME=<unmodded game>] \
-#       [SELFTEST=1|drops|ore|laser|item|pulse|lens|lens-effect] [NEGATIVE=1] tools/e2e.sh
+#       [SELFTEST=1|drops|ore|laser|item|pulse|lens|lens-effect|detonation] [NEGATIVE=1] tools/e2e.sh
 set -euo pipefail
 export LC_ALL=C
 
@@ -1918,9 +1926,102 @@ echo "  the plain lens's shot: $DIFF_LINE"
 
 ctl command "clear @s" >/dev/null
 ctl command "kill @e[type=item]" >/dev/null
+ctl wait 4
+
+# ---------------------------------------------------------------------------
+# O: the detonator lens's own beam effect (0.2.12)
+# ---------------------------------------------------------------------------
+echo "== the detonator lens's own beam effect (0.2.12) =="
+# Upstream `LensDetonation.invoke` (cd9d9c6, LensDetonation.java:22-48): ENERGY_USE 250,000 CF
+# on top of the shot's 1,000 CF gate, `explode(null, hit + 0.5, 10F, true,
+# ExplosionInteraction.NONE)`, reach 30, and `return true` for any non-air sight. The artefact's
+# `NONE` keeps blocks at this pin (the pin's own docs: "Blocks stay; entities are hurt and pushed"):
+# the sighted stone therefore stays, and the blast is proved by the 250,000 CF it spends and the
+# fire `fire=true` lights in the air over the stone floor. The brief's proposed crater is not
+# artefact-true and is deliberately not asserted. The harness gives the lens: its own craft needs
+# crystals this package does not carry.
+DET_Z=60
+ctl command "fill -10 99 55 22 99 65 minecraft:stone" >/dev/null
+ctl command "fill -10 100 55 22 110 65 minecraft:air" >/dev/null
+DET_X=0
+DET_TARGET=$((DET_X + 2))
+ctl command "setblock $DET_X 100 $DET_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $DET_TARGET 100 $DET_Z minecraft:stone" >/dev/null
+ctl command "give @s actuallyadditions:lens_of_detonation 1" >/dev/null
+ctl wait 4
+echo "  the detonator lens is harness-given (its craft needs crystals this package lacks): $(ctl inventory | jq -c '.held.item // empty')"
+click_with actuallyadditions:lens_of_detonation "$DET_X" 100 "$DET_Z"
+line=$(info "$DET_X" 100 "$DET_Z")
+echo "  after the detonator-lens click: $line"
+case "$line" in
+    *"lens actuallyadditions:lens_of_detonation x1"*) ;;
+    *) fail "the detonator lens did not fill the slot: $line" ;;
+esac
+case "$(sight_of "$line")" in
+    *"detonation @ 250000 CF"*) ;;
+    *) fail "the readout did not name the detonation's price: $(sight_of "$line")" ;;
+esac
+
+ctl tp "$((DET_X + 6)).5" 100 "$(centre "$DET_Z")" >/dev/null
+fire_in_box() { ctl blocks -10 100 55 22 104 65 | jq -r '.counts["minecraft:fire"] // 0'; }
+DET_FIRE_BEFORE=$(fire_in_box)
+charge "$DET_X" 100 "$DET_Z" 251000 >/dev/null
+# The blast keeps blocks, so poll the buffer: a shot spends the 1,000 CF gate and the lens's
+# 250,000 CF. The 100-tick cycle is phase-derived, so a fixed wait can sample either side.
+for _ in $(seq 1 60); do
+    ctl wait 4 >/dev/null
+    DET_LINE=$(info "$DET_X" 100 "$DET_Z")
+    [ "$(energy_of "$DET_LINE")" = 251000 ] || break
+done
+DET_ENERGY=$(energy_of "$DET_LINE")
+DET_FIRE=$(fire_in_box)
+DET_BLOCK=$(block_state_of "$DET_TARGET" 100 "$DET_Z")
+echo "  after the detonation shot: $DET_LINE"
+echo "  the sighted block after the shot: $DET_BLOCK"
+echo "  fire in the blast box before and after: $DET_FIRE_BEFORE -> $DET_FIRE"
+if [ "$SELFTEST" = detonation ]; then
+    # The flipped assertion says nothing happened — true only on a package without the blast.
+    if [ "$DET_ENERGY" = 250000 ] && [ "$DET_FIRE" = 0 ]; then
+        fail "SELFTEST detonation: the flipped assertion passed (no blast), so it proves nothing"
+    fi
+    fail "SELFTEST detonation: the shot spent 250000 CF and lit $DET_FIRE fire block(s) (the real assertion); the flipped assertion 'nothing happened' fails, so the real one can fail"
+fi
+[ "$DET_ENERGY" = 0 ] || fail "the detonator did not spend its 250,000 CF: $DET_LINE"
+[ "$DET_FIRE" -gt 0 ] || fail "the detonator set off no blast (no fire in the arena): before=$DET_FIRE_BEFORE after=$DET_FIRE"
+case "$DET_BLOCK" in
+    minecraft:stone*) echo "  the sighted stone stayed (the artefact's ExplosionInteraction.NONE keeps blocks)" ;;
+    *) fail "the detonator broke the sighted stone (the artefact uses NONE, which keeps blocks): $DET_BLOCK" ;;
+esac
+
+# The differential: a fresh default-lens machine with the same charge keeps 250,000 CF (only the
+# 1,000 CF gate is spent), sights the same stone, and sets off no blast at all.
+DIFF_DET_X=14
+DIFF_DET_TARGET=$((DIFF_DET_X + 2))
+ctl command "setblock $DIFF_DET_X 100 $DET_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $DIFF_DET_TARGET 100 $DET_Z minecraft:stone" >/dev/null
+ctl tp "$((DIFF_DET_X + 6)).5" 100 "$(centre "$DET_Z")" >/dev/null
+DIFF_FIRE_BEFORE=$(fire_in_box)
+charge "$DIFF_DET_X" 100 "$DET_Z" 251000 >/dev/null
+ctl wait 60 >/dev/null
+DIFF_DET_LINE=$(info "$DIFF_DET_X" 100 "$DET_Z")
+if [ "$(energy_of "$DIFF_DET_LINE")" = 251000 ]; then
+    ctl wait 60 >/dev/null
+    DIFF_DET_LINE=$(info "$DIFF_DET_X" 100 "$DET_Z")
+fi
+DIFF_DET_FIRE=$(fire_in_box)
+echo "  the plain lens's shot: $DIFF_DET_LINE"
+echo "  the plain lens's fire before and after: $DIFF_FIRE_BEFORE -> $DIFF_DET_FIRE"
+echo "  the plain lens's sighted block: $(block_state_of "$DIFF_DET_TARGET" 100 "$DET_Z")"
+[ "$(energy_of "$DIFF_DET_LINE")" = 250000 ] || fail "the plain lens spent more than the 1,000 CF gate: $DIFF_DET_LINE"
+[ "$DIFF_DET_FIRE" = "$DIFF_FIRE_BEFORE" ] || fail "the plain lens set off a blast: $DIFF_FIRE_BEFORE -> $DIFF_DET_FIRE"
+case "$(block_state_of "$DIFF_DET_TARGET" 100 "$DET_Z")" in
+    minecraft:stone*) ;;
+    *) fail "the plain lens changed its sighted stone" ;;
+esac
+
 ctl command "tp @s 0.5 100 3.5" >/dev/null
 ctl wait 6
 
 control
 
-echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), the reconstructor's redstone mode started off and a stick left it there while a click holding a redstone torch switched it to pulse mode without placing the torch, pulse mode neither ran its cycle nor fired without a signal, a redstone block beside the machine fired exactly one 1,040 CF shot on each of two rising edges (two crystals, a 2,080 CF buffer emptied, the cycle untouched) while the same machine without the toggle stayed frozen on the same signal and spent nothing, and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed; the lens (eight glass and a Black Quartz, all nine consumed) crafted and right-clicked into the reconstructor's empty slot (info read lens actuallyadditions:lens x1), a second lens was refused by the occupied slot and a stick was refused by the slot, and a dropped lens in the beam became lens_of_color for the 1,000 CF gate plus the 5,000 CF ring conversion (40 CF left) while a dropped stick stayed and spent only its gate, and the harness-given miner lens in the slot made a 61,000 CF shot swap the sighted stone for one of the nine mining-lens ores (the block read back with ctl block) while a fresh default-lens machine kept its stone and spent only its gate"
+echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), the reconstructor's redstone mode started off and a stick left it there while a click holding a redstone torch switched it to pulse mode without placing the torch, pulse mode neither ran its cycle nor fired without a signal, a redstone block beside the machine fired exactly one 1,040 CF shot on each of two rising edges (two crystals, a 2,080 CF buffer emptied, the cycle untouched) while the same machine without the toggle stayed frozen on the same signal and spent nothing, and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed; the lens (eight glass and a Black Quartz, all nine consumed) crafted and right-clicked into the reconstructor's empty slot (info read lens actuallyadditions:lens x1), a second lens was refused by the occupied slot and a stick was refused by the slot, and a dropped lens in the beam became lens_of_color for the 1,000 CF gate plus the 5,000 CF ring conversion (40 CF left) while a dropped stick stayed and spent only its gate, and the harness-given miner lens in the slot made a 61,000 CF shot swap the sighted stone for one of the nine mining-lens ores (the block read back with ctl block) while a fresh default-lens machine kept its stone and spent only its gate, and the harness-given detonator lens in the slot made a 251,000 CF shot set off the artefact's sourceless radius-10 fiery blast — spending 250,000 CF and lighting fire in the arena while **keeping** the sighted stone, because upstream's ExplosionInteraction.NONE keeps blocks at this pin — whereas a fresh default-lens machine kept its 250,000 CF, started no fire and kept its stone"

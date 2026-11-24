@@ -1,5 +1,40 @@
 # Validation
 
+**0.2.12 (2026-11-24, pin `0a875da`)** — slice 11: the **detonator lens's own beam effect**. Every
+cargo step was forwarded to the remote runner (`REMOTE_HOST=AdLf-PC`, no `BUILD_LOCAL=1` for the
+cargo steps); the launcher build ran in a **local** slot because the far box lacks
+`libxkbcommon-x11.so.0`. `LensDetonation.invoke` (`cd9d9c63`) spends 250,000 CF after the shot's
+1,000 CF gate on a sourceless radius-10 blast with `fire=true` and `ExplosionInteraction.NONE`.
+The artefact wins over the brief's proposed crater: at this pin `NONE` **keeps blocks**, so the
+in-game leg proves the blast by its energy spend and its fire, and asserts the stone stays.
+
+| Check | Command | Result |
+|---|---|---|
+| rules (red) | `cargo test --offline`, the three detonator rules undefined | **10 errors**, `cannot find value LENS_OF_DETONATION`, `cannot find value DETONATION_LENS_ENERGY`, `no variant Detonation`, `cannot find function detonation_stop` — `evidence/actuallyadditions/sdk-test-red-detonation.log` |
+| tests | `cargo test --offline` | **67 passed / 0 failed** (48 runtime incl. 4 json and the detonator rules, 19 glue), `Compiling actuallyadditions v0.2.12` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` | `7 recipe(s), 36 craftable, 0 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **177,060 B** both, `cmp` identical, sha256 `abafd0075c23eeb80a7f1b25b3fdea0b0587719171a591d5774a8eecd6249a57`, **201 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.12 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 177,060 bytes, EXIT 0 — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1**, `package matches the tree`, R9 rows green — `verify-gate-0.2.12.log` |
+| launcher build | `native-0a875da-301e07058952` | `Compiling actuallyadditions (1 of 1)` — `launcher-build-0.2.12.log` |
+| in-game | `tools/e2e.sh` (`--offscreen`, the launcher build of this package) | `PASS` + `EXIT:0` — `e2e-launcher.log` (first line names the delivered sha) |
+| counterfactual | `SELFTEST=detonation` | `FAIL: SELFTEST detonation: the shot spent 250000 CF and lit 50 fire block(s) (the real assertion)` + `EXIT:1` — `e2e-launcher-selftest-detonation.log` |
+| counterfactual | `SELFTEST={lens-effect,lens,1,drops,ore,laser,item,pulse}` | each `FAIL:` + `EXIT:1` — the eight earlier selftest logs |
+| counterfactual | `NEGATIVE=1` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour)` + `EXIT:1` — `e2e-launcher-negative.log` |
+| control | `CONTROL=1` (the same Nightly, no package) | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=12 ok=12 missing-exit=0 bad-exit=0`, exit 0 — `e2e-audit-0.2.12.log` |
+
+The detonator phase's own lines (`e2e-launcher.log`): the harness-given lens fills the slot and the
+readout names `sight minecraft:stone -> detonation @ 250000 CF`; a 251,000 CF shot spends the gate
+and the lens's 250,000 CF (buffer 0) and lights **53** fire blocks in the blast box, while the
+sighted stone **stays** (the artefact's `NONE`), and the differential default-lens machine keeps
+250,000 CF, starts no fire and keeps its stone. `SELFTEST=detonation` flips the assertion to
+"nothing spent, no fire", which fails on this package.
+
 **0.2.11 (2026-11-24, pin `0a875da`)** — slice 10: the **miner lens's own beam effect**. Every cargo
 step was forwarded to the remote runner (`REMOTE_HOST=AdLf-PC`, no `BUILD_LOCAL=1`). The launcher
 game was built locally (`Compiling actuallyadditions (1 of 1)`, `native-0a875da-f6e610072fc5`).

@@ -13,22 +13,23 @@ use std::sync::{Mutex, OnceLock};
 use mod_api::{
     self, BiomeModifier, BiomeModifierOperation, BlockClick, BlockDropsEvent, BlockEntityEvent,
     BlockEntityPart, BlockEntityTickEvent, BlockEntityTickReply, BlockEntityTicksEvent, BlockPart,
-    BlockState, BlockUpdateFlags, Command, CommandArgumentValue, Compound, ENERGY, Flow, Host,
-    HostTransaction, Identifier, Ingredient, InteractionResult, ItemKey, ItemPart, ItemPlace,
-    ItemResource, ItemStack, LevelHost, LevelRef, LevelSide, ModContainer, ModEnergyBuffer,
-    OnBlockPlacedByEvent, RandomSource, Registrar, RegistrationContext, RunModCommandEvent,
-    ServerHost, StateForPlacementEvent, Tag, Text, move_energy,
+    BlockState, BlockUpdateFlags, Command, CommandArgumentValue, Compound, ENERGY,
+    ExplosionInteraction, ExplosionSettings, Flow, Host, HostTransaction, Identifier, Ingredient,
+    InteractionResult, ItemKey, ItemPart, ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef,
+    LevelSide, ModContainer, ModEnergyBuffer, OnBlockPlacedByEvent, RandomSource, Registrar,
+    RegistrationContext, RunModCommandEvent, ServerHost, StateForPlacementEvent, Tag, Text,
+    move_energy,
 };
 
 use crate::runtime::{
     CONVERTED_MARKER, CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, Conversion, CrushResult,
-    Crusher, CrushingRecipe, GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, LaserRecipe,
-    LensEffect, MINING_LENS_ENERGY, MiningLensRecipe, RECONSTRUCTOR_CAPACITY,
-    RECONSTRUCTOR_LENS_DISTANCE, RECONSTRUCTOR_MAX_INSERT, RECONSTRUCTOR_TICKS, Reconstructor,
-    Signal, Step, bonus_for, can_crush, clamp_energy, comparator_strength, conversion_plane,
-    convert, facing_for_placement, is_fuel, is_lens, item_scan_box, items_possible,
-    lens_slot_accepts, may_convert, pick_weighted, reconstructor_comparator, restored_crusher,
-    restored_generator, restored_reconstructor,
+    Crusher, CrushingRecipe, DETONATION_BLAST_RADIUS, DETONATION_LENS_ENERGY, GENERATOR_CAPACITY,
+    GENERATOR_MAX_EXTRACT, Generator, LaserRecipe, LensEffect, MINING_LENS_ENERGY,
+    MiningLensRecipe, RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_MAX_INSERT, RECONSTRUCTOR_TICKS,
+    Reconstructor, Signal, Step, bonus_for, can_crush, clamp_energy, comparator_strength,
+    conversion_plane, convert, detonation_stop, facing_for_placement, is_fuel, is_lens,
+    item_scan_box, items_possible, lens_slot_accepts, may_convert, pick_weighted,
+    reconstructor_comparator, restored_crusher, restored_generator, restored_reconstructor,
 };
 
 /// The generator block; its block entity type carries the same path.
@@ -781,7 +782,7 @@ pub(crate) fn tick_reconstructor(
 
 /// `MethodHandler.invokeReconstructor`: pay the shot's 1000 CF, then walk the beam outward,
 /// converting the 3x3 plane around each block it meets. The beam stops at the first block that
-/// is not air, or after [`RECONSTRUCTOR_LENS_DISTANCE`] blocks.
+/// is not air, or after the installed lens's own reach (ten blocks, thirty for the detonator).
 fn fire_beam(
     host: &mut dyn ServerHost,
     level: LevelRef,
@@ -817,11 +818,56 @@ fn fire_beam(
                 block_id(&*host, level, hit).is_some_and(|id| !is_air(&id))
             }
             LensEffect::Mining => mining_step(host, level, hit, state),
+            LensEffect::Detonation => detonation_step(host, level, hit, state),
         };
         if solid || distance == effect.distance() {
             break;
         }
     }
+}
+
+/// `LensDetonation.invoke` at one beam step: a sourceless radius-10 blast centred on the sighted
+/// block, then the lens's own 250,000 CF. Upstream passes `null` as the explosion's source (the
+/// pin's `None`), `fire = true` and `ExplosionInteraction.NONE`: at this pin that means the blast
+/// hurts and pushes entities and lights some of the air over solid blocks, but **keeps blocks** —
+/// the stone it sights stays. The beam stops at any non-air sight, even when the buffer cannot pay
+/// or the host refuses the blast; air lets it walk on. This is deliberately not a `set_block`
+/// "break": the real `LevelRef::explode` surface is used, with the artefact's own interaction.
+fn detonation_step(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    hit: [i32; 3],
+    state: &mut Reconstructor,
+) -> bool {
+    let Some(id) = block_id(&*host, level, hit) else {
+        return detonation_stop(true);
+    };
+    let air = is_air(&id);
+    if !air && state.can_afford(DETONATION_LENS_ENERGY) {
+        let centre = [
+            f64::from(hit[0]) + 0.5,
+            f64::from(hit[1]) + 0.5,
+            f64::from(hit[2]) + 0.5,
+        ];
+        // Charge only on a blast that actually happened: a refused explode (a parked level or
+        // an unloaded chunk) must not silently eat 250,000 CF. Upstream ignores the blast's
+        // result; here the cost is charged only where an explosion was actually set off.
+        if level
+            .explode(
+                &mut *host,
+                None,
+                centre,
+                DETONATION_BLAST_RADIUS,
+                true,
+                ExplosionInteraction::None,
+                ExplosionSettings::default(),
+            )
+            .is_ok()
+        {
+            state.spend(DETONATION_LENS_ENERGY);
+        }
+    }
+    detonation_stop(air)
 }
 
 /// `LensMining.invoke` at one beam step: the sighted block (not the 3x3 plane) is swapped for a
@@ -1755,7 +1801,8 @@ fn reconstructor_sight(
         return "unknown".to_owned();
     };
     let step = facing.offset();
-    for distance in 1..=RECONSTRUCTOR_LENS_DISTANCE {
+    let effect = LensEffect::of(lens.unwrap_or(""));
+    for distance in 1..=effect.distance() {
         let at = [
             pos[0] + step[0] * distance,
             pos[1] + step[1] * distance,
@@ -1768,7 +1815,7 @@ fn reconstructor_sight(
             continue;
         }
         let stack = block_item_stack(host, level, at);
-        return match LensEffect::of(lens.unwrap_or("")) {
+        return match effect {
             LensEffect::Conversion => match stack.and_then(|stack| find_laser_recipe(host, &stack))
             {
                 Some(recipe) => format!(
@@ -1787,6 +1834,9 @@ fn reconstructor_sight(
                 Some(id) => format!("{block} -> mining {id} @ {MINING_LENS_ENERGY} CF"),
                 None => format!("{block} -> nothing"),
             },
+            LensEffect::Detonation => {
+                format!("{block} -> detonation @ {DETONATION_LENS_ENERGY} CF")
+            }
         };
     }
     "nothing".to_owned()
