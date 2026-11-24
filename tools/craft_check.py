@@ -37,7 +37,10 @@ Generator recipe at all. The phases:
      machine from four iron ingots (`#c:ingots/iron`), four redstone
      (`#c:dusts/redstone`) and one iron casing, all nine consumed;
   J  its two tag keys are not wildcards — gold ingots in the iron cells and
-     glowstone dust in the redstone cells each leave the result empty.
+     glowstone dust in the redstone cells each leave the result empty;
+  K  (0.2.10) the lens (`GGG / GBG / GGG`) crafts from eight `#c:glass_blocks`
+     members and one Black Quartz, all nine consumed, leaving one lens in the
+     inventory for the slot leg; stone in the glass cells leaves the result empty.
 
 `--negative` is the counterfactual: it asserts the *pre-0.2.4* state (the Coal
 Generator's recipe is not unlocked) and therefore must fail on this package,
@@ -436,6 +439,38 @@ def main() -> int:
         ],
     )
 
+    # K (0.2.10): the lens's own recipe, `GGG/GBG/GGG`, eight `#c:glass_blocks` members and one
+    # Black Quartz. One crafted lens is left in the inventory for the e2e's lens-slot phase.
+    lens_unlock = run("command", "recipe give @s actuallyadditions:lens")
+    say(f"  recipe give actuallyadditions:lens -> {json.dumps(lens_unlock)}")
+    if "Unlocked 1 recipe" not in " ".join(lens_unlock.get("chat", [])):
+        failures.append("actuallyadditions:lens is not in the recipe book")
+    GLASS_CELLS = [GRID[c] for c in ("tl", "tm", "tr", "ml", "mr", "bl", "bm", "br")]
+    # #c:glass_blocks is a tag, not a wildcard: stone in the eight cells crafts nothing. This
+    # control runs *before* the craft, whose `setup` clears the inventory and leaves the lens.
+    empty_control(
+        "control: stone where #c:glass_blocks goes (not a member)",
+        [("minecraft:stone", 8), ("actuallyadditions:black_quartz", 1)],
+        [
+            ("minecraft:stone", GLASS_CELLS),
+            ("actuallyadditions:black_quartz", [CENTRE]),
+        ],
+    )
+    craft(
+        "lens (8 glass + 1 black quartz)",
+        [("minecraft:glass", 8), ("actuallyadditions:black_quartz", 1)],
+        [
+            ("minecraft:glass", GLASS_CELLS),
+            ("actuallyadditions:black_quartz", [CENTRE]),
+        ],
+        {
+            "minecraft:glass": 0,
+            "actuallyadditions:black_quartz": 0,
+            "actuallyadditions:lens": 1,
+        },
+        result_item="actuallyadditions:lens",
+    )
+
     try:
         run("close")
     except SystemExit:
@@ -458,7 +493,9 @@ def main() -> int:
           "consumed; and the Atomic Reconstructor's own recipe unlocks and crafts one machine from "
           "four iron ingots, four redstone (#c:dusts/redstone) and one iron casing, all nine "
           "consumed, staying empty for gold ingots in the iron cells and glowstone dust in the "
-          "redstone cells")
+          "redstone cells; and the lens (`GGG/GBG/GGG`) crafts from eight glass (a "
+          "`c:glass_blocks` member) and one Black Quartz, all nine consumed, while stone in the "
+          "glass cells stays empty")
     return 0
 
 

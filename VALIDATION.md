@@ -1,5 +1,43 @@
 # Validation
 
+**0.2.10 (2026-11-24, pin `0a875da`)** — the **lens items and the lens slot**. Every cargo step
+was forwarded to the second box (`build-slot: forwarding … to the remote runner`,
+`REMOTE_HOST=AdLf-PC`); no `BUILD_LOCAL=1`. The launcher game was built locally so the
+`--offscreen` e2e had its binary — `Compiling actuallyadditions (1 of 1)`,
+`native-0a875da-b7cae93da59c`. The four lens ring items, the `lens` recipe and the four 5,000 CF
+conversions are carried; a right click fills the slot, a non-lens and a second lens are refused,
+and a dropped lens converts for gate + 5,000 CF.
+
+| Check | Command | Result |
+|---|---|---|
+| rules (red) | `cargo test --offline`, `lens_slot_accepts` at `todo!()` | **59 passed / 1 failed**, `not yet implemented: the lens slot's acceptance rule` — `evidence/actuallyadditions/sdk-test-red-lens.log` |
+| tests | `cargo test --offline` | **60 passed / 0 failed** (19 runtime, 4 json, 18 reconstructor, 19 glue), `Compiling actuallyadditions v0.2.10` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` | `7 recipe(s), 16 craftable, 0 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **162,102 B** both, `cmp` identical, sha256 `63f263561061eede2b60fcd2886917004a998cc0321c302b32bfc02e6ca7b54b`, **174 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.10 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 162102 bytes, EXIT 0 — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1**, `package matches the tree`, R9 rows green |
+
+| in-game | `tools/e2e.sh` (`--offscreen`, launcher build `native-0a875da-b7cae93da59c`) | `PASS` + `EXIT:0` — `e2e-launcher.log` (first line names the delivered sha, 162102 bytes) |
+| counterfactual | `SELFTEST=lens` | `FAIL: SELFTEST lens: the slot accepted the lens (the real assertion); the flipped assertion 'it stays empty' fails, so the real one can fail` + `EXIT:1` — `e2e-launcher-selftest-lens.log` |
+| counterfactual | `SELFTEST=1` | `FAIL: SELFTEST flipped: the placed machine kept 2560 FE, not 0` + `EXIT:1` |
+| counterfactual | `SELFTEST=drops` | `FAIL: SELFTEST drops: the payload carries no Items (the fixed behaviour)` + `EXIT:1` |
+| counterfactual | `SELFTEST=ore` | `FAIL: SELFTEST ore: the ore dropped Black Quartz (the real assertion)` + `EXIT:1` |
+| counterfactual | `SELFTEST=laser` | `FAIL: SELFTEST laser: the beam made a crystal (the real assertion)` + `EXIT:1` |
+| counterfactual | `SELFTEST=item` | `FAIL: SELFTEST item: the beam converted the dropped item (the real assertion)` + `EXIT:1` |
+| counterfactual | `SELFTEST=pulse` | `FAIL: SELFTEST pulse: the rising edge fired a shot (the real assertion)` + `EXIT:1` |
+| counterfactual | `NEGATIVE=1` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour)` + `EXIT:1` |
+| control | `CONTROL=1` (the same Nightly, no package) | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=10  ok=10  missing-exit=0  bad-exit=0`, exit 0 |
+
+All e2e legs stayed local: the brief's `build-slot.sh run … --step e2e` path (the workaround for
+launcher-migrated ports) does not take the e2e forwarder's remote branch, and the script is
+`--offscreen` (the far box has no renderer). Every cargo step was forwarded to `AdLf-PC`.
+The 0.2.9 section follows.
+
 **0.2.9 (2026-11-23, pin `0a875da`)** — packaging: the **registry's R9**. The automated check at
 `495701cf` refused 0.2.8 (*"refused rules R9"*), because `Cargo.toml` declared
 `serde_json = "=1.0.151"` and the package packed the lock that dependency forces; the registry

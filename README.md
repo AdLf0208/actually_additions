@@ -1,8 +1,8 @@
-# Actually Additions → Horizon (slices 1–7)
+# Actually Additions → Horizon (slices 1–9)
 
 The **Coal Generator**, the **Crusher** and the **Atomic Reconstructor** of Actually Additions
 1.3.26 (`Ellpeck/ActuallyAdditions`, **MIT**) as one flat SDK package (mod API `0.2`, version
-`0.2.9`), built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` and
+`0.2.10`), built by the launcher against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` and
 mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` for Minecraft 26.3.
 
 - [`FINDINGS.md`](FINDINGS.md) — upstream behaviour read from the source, the slice boundary and
@@ -44,19 +44,20 @@ mixins `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` for Minecraft 26.3.
 | The beam's item half | `invokeConversionLens` also converts the dropped items in the box from the machine to the block it hit, as many as the buffer pays for, marking each result `aa_cnv` | the same: a dropped redstone becomes a Restonia Crystal (count conserved), one entity per beam step, the remainder of a stack stays convertible, and all six facings work (upstream's box is inverted on three of them) |
 | A conversion's order | the result is spawned first, then the source is removed with `removeBlock`'s answer ignored; the energy is charged anyway | the source goes first and its answer is checked, the result arrives only if it did (or the source is put back), and the recipe's energy is charged only when the conversion happened — in the block half and the item half |
 | Redstone mode | `isPulseMode`: a rising edge of `getBestNeighborSignal` fires one shot, and the cycle never free-runs; a click with the config's `redstoneConfigurator` (default a redstone torch) toggles it, and the mode travels on the broken item | the same: a `pulse on/off` field in the `/actuallyadditions info` line, one shot per rising edge, the cycle frozen in pulse mode, the flag in the drop's payload |
+| Lens slot | `getLens()` takes an `ILensItem` from the reconstructor's one slot; an occupied slot refuses a second lens, and the four lenses form a 5,000 CF laser ring | the four ring items, their recipe and the `c:glass_blocks` tag ship; a right click fills the slot (the `info` line names it), a non-lens and a second lens are refused, and a dropped lens converts to the next one; the behaviour lenses' own beam effects stay out of scope |
 
 Not ported, and recorded as gaps in [`notes.md`](notes.md): the GUI
 (`blocked(no-single-player-mod-screen)`), the Double Crusher and the other ~44 machines, the rest of
 redstone control (only the reconstructor toggles; the generator and the crusher do not), a
-relay/cable, the Empowerer and the empowered crystals, lens items
-(1.3.26's only lens source is the reconstructor's own four-recipe lens cycle, which needs a lens to
-start), the ore's generation (`blocked(configured-feature-not-registered)`), the booklet,
+relay/cable, the Empowerer and the empowered crystals, the behaviour lenses' own beam effects (the
+plain lens and the three ring items ship, their crafting recipes do not — they name crystals this
+package lacks), the ore's generation (`blocked(configured-feature-not-registered)`), the booklet,
 `lit`/particles.
 
 ## Quick checks
 
 ```sh
-cargo test --offline                                       # 59 tests: 19 runtime, 4 json, 17 reconstructor (pulse + conversion), 19 glue
+cargo test --offline                                       # 60 tests: 19 runtime, 4 json, 18 reconstructor (pulse + conversion + lens), 19 glue
 cargo clippy --all-targets --offline -- -D warnings         # 0 warnings
 cargo fmt --check                                          # not --all: that checks the fetched SDK
 rm -f Cargo.lock && cargo horizon-mod build                # no lock in the tree: the registry packs none (R9)

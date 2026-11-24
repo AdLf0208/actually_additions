@@ -26,6 +26,11 @@ copies the two machines' files and applies only the patches listed in
    because upstream's tab is code, and a subset `lang/en_us.json`.
 6. `data/c/tags/item/cobblestones.json` (slice 3): NeoForge's `c:cobblestones`
    convention tag, which 26.3 does not ship and both machine recipes key on.
+7. (slice 9, 0.2.10) the four lens items of the jar's `laser/` ring, their models, textures and
+   `horizon/item` declarations (with `max_stack_size: 1`, as upstream's `ItemLens` does), the
+   `lens` crafting recipe and the four lens conversions, plus the `c:glass_blocks` tag the
+   crafting recipe keys on. The four behaviour lenses' own crafting recipes are not carried: they
+   name crystals and enchanted books this package does not ship.
 
 Run from the campaign root; it writes `assets/` and `data/` at the package root (the SDK
 layout — there is no `content/` folder any more, and the root `horizon-mod.toml` is the only
@@ -78,6 +83,24 @@ LASER_RECIPES = (
     "nether_wart",
     "prismarine_shard",
     "soul_sand",
+)
+# Slice 9 (0.2.10): the jar's `lens` crafting recipe (`GGG/GBG/GGG`, eight glass and one Black
+# Quartz) and the four `laser/lens*` conversions, a 5,000 CF ring:
+# `lens → lens_of_color → lens_of_detonation → lens_of_certain_death → lens`. The brief said
+# "five"; the jar has four (the artefact wins). The four behaviour lenses' own crafting recipes
+# name items this package does not carry, so they stay out of scope.
+LENS_RECIPES = ("lens",)
+LENS_LASER_RECIPES = ("lens", "lens_of_color", "lens_of_detonation", "lens_of_certain_death")
+LENS_ITEMS = LENS_LASER_RECIPES
+# NeoForge 1.21.x's `c:glass_blocks`: glass, tinted glass and the 16 stained glass blocks; panes
+# belong to `c:glass_panes`. 26.3 ships no `c:` namespace, so the tag the lens recipe keys on is
+# declared here. Every member exists in the 26.3 item registry (check_recipe_keys.py verifies it).
+GLASS_BLOCK_TAG = ("minecraft:glass", "minecraft:tinted_glass") + tuple(
+    f"minecraft:{colour}_stained_glass"
+    for colour in (
+        "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+        "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black",
+    )
 )
 # NeoForge 1.21.x's `Tags.Items.DUSTS_REDSTONE` and `Tags.Items.SANDS` (26.3 ships no `c:`
 # namespace, so the two tags the machine's recipe and its soul-sand conversion key on are
@@ -518,6 +541,45 @@ def main() -> None:
         json.dumps({"values": list(SANDS_TAG)}, indent=2) + "\n",
     )
 
+    # (0.2.10) the lens ring: its crafting recipe, the four 5,000 CF conversions the beam's item
+    # half already supports, and the four items/models/textures they produce. The `lens` recipe
+    # keys on `c:glass_blocks`, which 26.3 does not ship, so it is declared below.
+    for recipe in LENS_RECIPES:
+        copy(
+            CARRY / f"data/actuallyadditions/recipe/{recipe}.json",
+            data / f"recipe/{recipe}.json",
+        )
+    for recipe in LENS_LASER_RECIPES:
+        copy(
+            CARRY / f"data/actuallyadditions/recipe/laser/{recipe}.json",
+            data / f"recipe/laser/{recipe}.json",
+        )
+    for item in LENS_ITEMS:
+        copy(
+            CARRY / f"assets/actuallyadditions/items/{item}.json",
+            assets / f"items/{item}.json",
+        )
+        copy(
+            CARRY / f"assets/actuallyadditions/models/item/{item}.json",
+            assets / f"models/item/{item}.json",
+        )
+        copy(
+            CARRY / f"assets/actuallyadditions/textures/item/{item}.png",
+            assets / f"textures/item/{item}.png",
+        )
+        animated = CARRY / f"assets/actuallyadditions/textures/item/{item}.png.mcmeta"
+        if animated.is_file():
+            copy(animated, assets / f"textures/item/{item}.png.mcmeta")
+        # Upstream's lens items are `stacksTo(1)`; the raw carry's stick template is stack 64.
+        write(
+            data / f"horizon/item/{item}.json",
+            json.dumps({"template": "minecraft:stick", "max_stack_size": 1}, indent=2) + "\n",
+        )
+    write(
+        OUT / "data/c/tags/item/glass_blocks.json",
+        json.dumps({"values": list(GLASS_BLOCK_TAG)}, indent=2) + "\n",
+    )
+
     # Upstream's creative tab is code; one tab for the slice, with the two
     # crafting-chain pieces the machine recipes are made of.
     write(
@@ -526,7 +588,7 @@ def main() -> None:
             {
                 "title": "itemGroup.actuallyadditions.machines",
                 "icon": "actuallyadditions:coal_generator",
-                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)] + [f"actuallyadditions:{GEM}"] + [f"actuallyadditions:{i}" for i in ITEMS] + [f"actuallyadditions:{RECONSTRUCTOR}", f"actuallyadditions:{CRYSTAL}"],
+                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)] + [f"actuallyadditions:{GEM}"] + [f"actuallyadditions:{i}" for i in ITEMS] + [f"actuallyadditions:{RECONSTRUCTOR}", f"actuallyadditions:{CRYSTAL}"] + [f"actuallyadditions:{i}" for i in LENS_ITEMS],
             },
             indent=2,
         )

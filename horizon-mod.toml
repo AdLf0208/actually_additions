@@ -2,8 +2,8 @@
 # Cargo's package name and version are not the mod's.
 id = "actuallyadditions"
 name = "Actually Additions"
-version = "0.2.9"
-description = """A port of Actually Additions 1.3.26 for Horizon, slices 1-7: the Coal Generator, the Crusher, the
+version = "0.2.10"
+description = """A port of Actually Additions 1.3.26 for Horizon, slices 1-9: the Coal Generator, the Crusher, the
 state a broken machine keeps, the crafting chain's pieces, the Black Quartz Ore, and the Atomic
 Reconstructor's laser conversion — for blocks and for dropped items — with its redstone pulse mode.
 The generator turns any fuel the game's fuel table knows into 20 FE a tick, up to a 60,000 FE buffer that
@@ -24,7 +24,8 @@ its buffer pays for, marking each result so it is never converted twice — whic
 becomes leather and quartz a prismarine shard. The crystal closes the chain: the Crusher's own recipe
 now crafts.
 A redstone signal freezes the reconstructor's cycle; a click with the config's redstone configurator (a redstone torch by default) switches it to pulse mode, where one shot fires per rising edge and the cycle never free-runs, and the mode travels on the machine's broken item.
-Not yet ported: the GUI, the Double Crusher and the other machines, the rest of redstone control (only the reconstructor toggles), energy relays, the Empowerer and the empowered crystals, lens items, the booklet."""
+The four lens items of the jar's 5,000 CF laser ring ship with the `c:glass_blocks` tag and the lens crafting recipe: a right click puts a lens in the reconstructor's slot (the `info` line names it), an occupied slot refuses a second lens, and a dropped lens converts to the next one in the ring.
+Not yet ported: the GUI, the Double Crusher and the other machines, the rest of redstone control (only the reconstructor toggles), energy relays, the Empowerer and the empowered crystals, the behaviour lenses' own beam effects, the booklet."""
 authors = ["Ellpeck", "AdLf0208"]
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
 # beside the carried assets/ and data/.

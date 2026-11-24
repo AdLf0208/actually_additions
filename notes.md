@@ -2347,3 +2347,195 @@ stands unchanged for 0.2.10.)
   generation (`blocked(configured-feature-not-registered)`), the beam's visual.
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+## Slice 9 (0.2.10, 2026-11-24) — the lens items and the lens slot
+
+**Family:** the four lens items of the jar's laser ring, the `lens` crafting recipe, the
+`c:glass_blocks` tag it keys on, and — the actual missing behaviour — the Atomic Reconstructor's
+**lens slot acceptance**: a right click with an `ILensItem` now fills the slot the machine already
+has, `info` names it, an occupied slot refuses a second lens, and a *dropped* lens in the beam is
+converted by the item half this port already ships.
+
+- **Gap line** (0.2.6 coverage table, `notes.md:1660`): *"the lens slot — not ported — no item in
+  this package is an `ILensItem`; the slot is declared, nothing can fill it, and the click refuses
+  every item"*.
+- **Why it fits `machines`:** items, a slot the machine already declares and the `getLens()` rule
+  inside it — no new block, renderer or hook kind. The four behaviour lenses' own beam effects are
+  a later slice; their acceptance here is faithful to `getLens`, and the beam uses the default
+  conversion rule for them (recorded deviation below).
+- **Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
+  `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
+
+### The artefact: the lens recipe and the conversion rows, as read
+
+`data/actuallyadditions/recipe/lens.json` (verbatim):
+
+```json
+{
+  "category": "misc",
+  "key": {"B": "actuallyadditions:black_quartz", "G": "#c:glass_blocks"},
+  "pattern": ["GGG", "GBG", "GGG"],
+  "result": {"count": 1, "id": "actuallyadditions:lens"},
+  "type": "minecraft:crafting_shaped"
+}
+```
+
+The jar's `recipe/laser/lens*.json` holds **four** conversions, each `"energy": 5000`, a ring —
+`lens → lens_of_color → lens_of_detonation → lens_of_certain_death → lens`:
+
+| file | ingredient | result | CF |
+|---|---|---|---:|
+| `laser/lens_of_color.json` | `actuallyadditions:lens` | `actuallyadditions:lens_of_color` | 5,000 |
+| `laser/lens_of_detonation.json` | `actuallyadditions:lens_of_color` | `actuallyadditions:lens_of_detonation` | 5,000 |
+| `laser/lens_of_certain_death.json` | `actuallyadditions:lens_of_detonation` | `actuallyadditions:lens_of_certain_death` | 5,000 |
+| `laser/lens.json` | `actuallyadditions:lens_of_certain_death` | `actuallyadditions:lens` | 5,000 |
+
+The brief said "five"; the jar has four (counted from `unzip -Z1 … | grep recipe/laser/`). The
+artefact wins. All four are carried; the four *behaviour* lenses' own crafting recipes
+(`lens_of_disenchanting`, `lens_of_the_killer`, `lens_of_the_miner`) key on empowered crystals and
+an enchanted book this package does not carry, so they stay out of scope. `c:glass_blocks` is
+declared with glass, tinted glass and the 16 stained glass blocks (panes belong to
+`c:glass_panes`), all present in 26.3.
+
+### TDD — the red, verbatim
+
+`runtime::lens_slot_accepts` was written at `todo!()` first; `evidence/actuallyadditions/sdk-test-red-lens.log`
+(`cargo test --offline`, exit 101):
+
+```text
+---- runtime::reconstructor_tests::a_lens_fills_the_empty_slot_and_a_second_lens_is_refused stdout ----
+
+thread 'runtime::reconstructor_tests::a_lens_fills_the_empty_slot_and_a_second_lens_is_refused' (27499) panicked at src/runtime.rs:1086:5:
+not yet implemented: the lens slot's acceptance rule
+
+test result: FAILED. 59 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+Green: **60 passed**, 0 failed (19 `runtime::tests`, 4 `json_tests`, 18 `reconstructor_tests`,
+19 `support::tests`); `Compiling actuallyadditions v0.2.10` in `sdk-test.log`.
+
+### Glue
+
+`support::reconstructor_click` now runs `lens_slot_accepts(slot, item)` (pure, in `runtime.rs`)
+before claiming the click: `insert_lens` takes one from the hand through `HostTransaction` and then
+writes slot 0, so a refused write cannot leave a free lens; an occupied slot refuses a second lens
+and a non-lens is refused. The `info` line already rendered the slot (`lens <id> x<count>`), so no
+new readout code was needed. The container still declares no `inputs`: the pin's input list cannot
+say "only a lens", so a hopper must not put an arbitrary item in a slot upstream protects.
+
+### Ladder — the remote job
+
+Every cargo step was forwarded (no `BUILD_LOCAL=1`):
+
+```text
+build-slot: forwarding test for ports/actuallyadditions to the remote runner
+REMOTE_HOST=AdLf-PC
+```
+
+| Step | Result |
+|---|---|
+| tests (red first) | 59 passed / 1 failed, `todo!()` — `sdk-test-red-lens.log` |
+| tests | **60 passed**, 0 failed, `Compiling actuallyadditions v0.2.10` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings`, exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check`, exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` — `7 recipe(s), 16 craftable, 0 blocked, 0 failure(s)` — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice — **162,102 B** both, `cmp` identical, sha256 `63f263561061eede2b60fcd2886917004a998cc0321c302b32bfc02e6ca7b54b`, **174 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `actuallyadditions 0.2.10 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 162102 bytes, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` → **1/1** (`package matches the tree`, R9 rows) |
+| launcher build | `native-0a875da-b7cae93da59c`, `Compiling actuallyadditions (1 of 1)` — `launcher-build.log` |
+
+The dependency-free `Json` reader from 0.2.9 is unchanged; R9 still passes (`SDK-only dependencies`,
+`no packed Cargo.lock`). No local type collided with the SDK surface this time, so both `fits`
+runs were green on the first attempt.
+
+### In-game transcript (`evidence/actuallyadditions-e2e/e2e-launcher.log`, 0.2.10)
+
+```text
+  recipe give actuallyadditions:lens -> {"chat": ["Unlocked 1 recipe(s) for Player52181"], "ok": true}
+  lens (8 glass + 1 black quartz): result {"count": 1, "item": "actuallyadditions:lens", "slot": 200}
+  lens (8 glass + 1 black quartz): inventory after the craft {"minecraft:glass": 0, "actuallyadditions:black_quartz": 0, "actuallyadditions:lens": 1}
+  the machine as placed: Atomic Reconstructor at 0,100,40: … lens default, … t=3286
+  after the lens click: Atomic Reconstructor at 0,100,40: … lens actuallyadditions:lens x1, … t=3334
+  after a stick click: Atomic Reconstructor at 0,100,40: … lens actuallyadditions:lens x1, … t=3382
+  after a second lens click: Atomic Reconstructor at 0,100,40: … lens actuallyadditions:lens x1, … t=3440
+  the refused lens is still in hand: actuallyadditions:lens
+  a dropped lens in the beam: 1 lens_of_color, 0 lens left; Atomic Reconstructor at 0,100,40: 40/300000 CF (… t=3595)
+  the differential after its shot: Atomic Reconstructor at 8,100,40: 40/300000 CF (… lens default, … t=3743)
+```
+
+6,040 CF pays the 1,000 CF gate (5,040 left) and the 5,000 CF lens conversion, leaving 40 — the
+item half already shipped, now with a recipe whose input exists. `check-e2e-logs.py
+actuallyadditions-e2e --strict` → `logs=10 ok=10`; the default leg is `PASS` + `EXIT:0` and each of
+`SELFTEST={lens,1,drops,ore,laser,item,pulse}`, `NEGATIVE=1` and the unmodded control is `FAIL` +
+`EXIT:1`. `SELFTEST=lens` flips the first assertion to "the slot stays empty", which is false on
+this package:
+`FAIL: SELFTEST lens: the slot accepted the lens (the real assertion); the flipped assertion 'it stays empty' fails, so the real one can fail` + `EXIT:1`.
+A dropped non-lens stays a stick and its shot spends only the gate.
+
+### Coverage (slice 9)
+
+| Family | State |
+|---|---|
+| `actuallyadditions:lens` recipe (`GGG/GBG/GGG`) | **tested** — `recipe give` unlocks one; the grid crafts one lens from eight glass and one black quartz, all nine consumed; stone in the glass cells stays empty |
+| `c:glass_blocks` | **tested** through its consumer; the tool refuses an empty tag |
+| the four lens items and their models/textures | **tested** — `lens` is crafted, `lens_of_color` is produced by the beam, all four are give-able declarations with `max_stack_size: 1` |
+| the lens slot's acceptance | **tested** — the crafted lens fills it (`info` reads `lens actuallyadditions:lens x1`); a stick and a second lens are refused, the second still in hand |
+| the four `laser/lens*` conversions (5,000 CF each) | **tested for `laser/lens_of_color`** — a dropped lens in the beam converts for gate + 5,000; the other three are the same code path, unit-tested and checked by `check_recipe_keys.py` |
+| the four behaviour lenses' own beam effects | **out of scope** — each needs a different beam action (break/damage/explode/disenchant); they are accepted as lenses but use the default conversion rule |
+| the GUI, ore generation, comparator, beam visual | unchanged: `blocked(no-single-player-mod-screen)`, `blocked(configured-feature-not-registered)`, printed-not-wired, no packet |
+
+### Deviations and gaps this slice adds
+
+1. **The three non-plain ring items are accepted but use the default beam rule.** Upstream's
+   `lens_of_color`/`lens_of_detonation`/`lens_of_certain_death` each change what the beam does; the
+   port only implements `getLens`'s *acceptance* (an `ILensItem` fills the slot) and the default
+   conversion effect. Their own effects are the next family.
+2. **The automation input list is still empty.** A hopper cannot insert a lens; upstream's handler
+   accepts only an `ILensItem`, which the pin's container input list cannot express, so the right
+   click is the supported route.
+3. **The craft of the ring's other three lenses is not carried** — their recipes name crystals
+   this package does not ship; the items exist because the beam makes them.
+
+### Harness facts measured while getting here
+
+1. **The e2e's dropped-item helper clears all item entities first**, so an earlier conversion's
+   output is gone by the time a differential shot runs; assert the differential's own count (0),
+   not the earlier one's.
+2. **Restore the player's stance after a phase at positive z.** The later block-break legs aim at
+   negative-z blocks from the arena centre; leaving the player 46 blocks away makes `ctl break`
+   answer "out of reach (4.5)" even though `ctl tp` was issued. A console `tp @s 0.5 100 3.5` at
+   the phase's end fixes it.
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+**Changelog (0.2.10):**
+
+> **0.2.10 — the lens items and the lens slot.** The four items of the jar's 5,000 CF lens ring,
+> their models/textures, the `lens` crafting recipe (`GGG/GBG/GGG`, eight `#c:glass_blocks` members
+> and one Black Quartz) and the four `laser/lens*` conversions ship, and the reconstructor's lens
+> slot is no longer inert: a right click with a lens fills it (the `info` line reads
+> `lens actuallyadditions:lens x1`), a non-lens and a second lens are refused, and a dropped lens in
+> the beam becomes `lens_of_color` for the 1,000 CF gate plus 5,000 CF. The behaviour lenses' own
+> beam effects remain out of scope. 60 unit tests, 174 entries, 162,102 B, sha256 `63f26356…7b54b`.
+
+## Next slice (0.2.11)
+
+**Family:** the **behaviour lenses' own beam effects** — the four lens items whose `Lens` action
+differs from the default conversion: the miner lens breaks the blocks it sights, the killer lens
+damages entities in the beam, the detonator explodes at the hit block, and the disenchanting lens
+strips enchantments from items.
+
+- **Gap line** (this slice's deviations, item 1): *"The three non-plain ring items are accepted but
+  use the default beam rule … their own effects are the next family."*
+- **Why it fits `machines`:** a branch in the beam the port already ships, driven by the lens id in
+  the slot it now accepts — no new block, renderer or hook kind. The behaviour lenses' *items* are
+  not carried yet (their crafting recipes key on crystals this package lacks); the next slice must
+  either carry those items with a reachable recipe or add the effect to the ring items already here.
+- **In-game assertion that can fail:** with a lens that changes the beam installed, aim at a
+  `minecraft:stone` block (not convertible by any carried `laser/` recipe) and tick a 1,040 CF shot:
+  the miner variant must break it while the default lens leaves it; the differential is the same
+  block with the plain lens in the slot.
+- **Out of scope:** the GUI (`blocked(no-single-player-mod-screen)`), the Double Crusher, the ore's
+  generation (`blocked(configured-feature-not-registered)`), the beam's visual.

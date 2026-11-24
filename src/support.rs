@@ -25,9 +25,9 @@ use crate::runtime::{
     Crusher, CrushingRecipe, GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, LaserRecipe,
     RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_LENS_DISTANCE, RECONSTRUCTOR_MAX_INSERT,
     RECONSTRUCTOR_TICKS, Reconstructor, Signal, Step, bonus_for, can_crush, clamp_energy,
-    comparator_strength, conversion_plane, convert, facing_for_placement, is_fuel, item_scan_box,
-    items_possible, may_convert, reconstructor_comparator, restored_crusher, restored_generator,
-    restored_reconstructor,
+    comparator_strength, conversion_plane, convert, facing_for_placement, is_fuel, is_lens,
+    item_scan_box, items_possible, lens_slot_accepts, may_convert, reconstructor_comparator,
+    restored_crusher, restored_generator, restored_reconstructor,
 };
 
 /// The generator block; its block entity type carries the same path.
@@ -203,11 +203,10 @@ pub(crate) fn crusher_battery() -> ModEnergyBuffer {
     }
 }
 
-/// The reconstructor's container: one lens slot. Automation may reach it but nothing may be
-/// inserted or taken: upstream's acceptor takes only an `ILensItem`, and no item in this package
-/// is one (1.3.26's sole lens source is the reconstructor's own lens cycle, which needs a lens to
-/// begin with), so a container that named the slot as insertable would let a hopper put any item
-/// there that upstream refuses.
+/// The reconstructor's container: one lens slot. Automation may reach it but the slot is not
+/// named insertable: upstream's acceptor takes only an `ILensItem`, while the pin's container
+/// input list cannot express "only a lens" — naming it would let a hopper put any item there that
+/// upstream refuses. A right click (`reconstructor_click`) is the supported way to insert a lens.
 pub(crate) fn reconstructor_container() -> ModContainer {
     ModContainer {
         slots: RECONSTRUCTOR_SLOTS,
@@ -1187,14 +1186,53 @@ fn redstone_mode_line(pulse: bool) -> String {
     )
 }
 
+/// The id in the reconstructor's lens slot, `None` when it is empty. The slot is the container's
+/// index 0 (`TileEntityAtomicReconstructor` has one slot), which `status_line`/`info` also reads.
+fn lens_slot_item(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<String> {
+    let entity = host.block_entity(level, pos)?;
+    let stack = entity.item_slot(host, INPUT_SLOT as u32).ok().flatten()?;
+    Some(stack.item().id(host))
+}
+
+/// Put one lens in the slot, through a transaction: take one from the hand first and require it,
+/// then write the slot, so a refused write cannot leave the machine with a free lens (the same
+/// pay-first rule the generator and crusher clicks use).
+fn insert_lens(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    held: &ItemStack,
+    hand: &ItemPlace,
+) -> bool {
+    host.transaction(|host, tx| -> Result<(), ()> {
+        let entity = host.block_entity(level, pos).ok_or(())?;
+        if entity
+            .item_slot(&*host, INPUT_SLOT as u32)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Err(()); // occupied: upstream hands back a lens, it does not stack two
+        }
+        if hand.extract(&mut *host, tx, &ItemResource::of(held), 1) != 1 {
+            return Err(());
+        }
+        let mut stack = held.clone();
+        stack.set_count(1).map_err(|_| ())?;
+        entity
+            .set_item_slot(&mut *host, tx, INPUT_SLOT as u32, Some(stack))
+            .map_err(|_| ())?;
+        let _ = entity.set_changed(&mut *host);
+        Ok(())
+    })
+    .is_ok()
+}
+
 /// A right click on the reconstructor. A hand holding the redstone configurator flips the pulse
 /// mode (`BlockContainerBase.tryToggleRedstone`) and the click is claimed, so the torch is never
-/// placed. Upstream otherwise fills its lens slot from a hand holding an `ILensItem` and hands a
-/// lens back on the same-item click; **no item in this package is a lens** (1.3.26's only lens
-/// source is the reconstructor's own four-recipe lens cycle, which needs a lens to start), so the
-/// slot can never be filled and every other held item is refused. An empty hand reads the status
-/// line, as on the other two machines: this slice has no GUI
-/// (`blocked(no-single-player-mod-screen)`).
+/// placed. A hand holding an `ILensItem` fills the empty lens slot (`getLens`); an occupied slot
+/// refuses a second lens and a non-lens is refused. An empty hand reads the status line, as on the
+/// other two machines: this slice has no GUI (`blocked(no-single-player-mod-screen)`).
 pub(crate) fn reconstructor_click(
     host: &mut dyn ServerHost,
     click: &BlockClick<'_>,
@@ -1204,7 +1242,8 @@ pub(crate) fn reconstructor_click(
     if block_id(&*host, level, click.pos).as_deref() != Some(RECONSTRUCTOR) {
         return None;
     }
-    if let Some(stack) = held.filter(|stack| stack.count() > 0)
+    let held = held.filter(|stack| stack.count() > 0);
+    if let Some(stack) = held
         && item_id(&*host, stack) == REDSTONE_CONFIGURATOR
     {
         if let Some(pulse) = toggle_pulse(host, level, click.pos)
@@ -1214,8 +1253,28 @@ pub(crate) fn reconstructor_click(
         }
         return Some(InteractionResult::Success);
     }
-    let line = match held.filter(|stack| stack.count() > 0) {
-        Some(stack) => format!("{} is not a lens", item_id(&*host, stack)),
+    let line = match held {
+        Some(stack) => {
+            let item = item_id(&*host, stack);
+            if is_lens(&item) {
+                let slot = lens_slot_item(&*host, level, click.pos);
+                if lens_slot_accepts(slot.as_deref(), &item) {
+                    let hand = ItemPlace::PlayerHand {
+                        player: click.player,
+                        hand: click.hand,
+                    };
+                    if insert_lens(host, level, click.pos, stack, &hand) {
+                        format!("installed {item}")
+                    } else {
+                        "the lens slot refused the lens".to_owned()
+                    }
+                } else {
+                    format!("the lens slot already holds {}", slot.unwrap_or_default())
+                }
+            } else {
+                format!("{item} is not a lens")
+            }
+        }
         None => status_line(host, click.pos),
     };
     if let Some(player) = host.player(click.player) {
@@ -2096,10 +2155,13 @@ mod tests {
     }
 
     #[test]
-    fn the_reconstructor_has_one_lens_slot_and_nothing_can_fill_it() {
+    fn the_reconstructor_has_one_lens_slot_and_automation_cannot_fill_it() {
         let container = reconstructor_container();
         assert_eq!(container.slots, RECONSTRUCTOR_SLOTS, "one lens slot");
-        assert!(container.inputs.is_empty(), "no lens item exists to accept");
+        assert!(
+            container.inputs.is_empty(),
+            "a hopper accepts any item, upstream accepts only a lens: the click is the route"
+        );
         assert!(container.outputs.is_empty());
         assert_eq!(container.menu, None, "no GUI in this slice");
         let battery = reconstructor_battery();
@@ -2172,6 +2234,18 @@ mod tests {
                 .contains("pulse on"),
             "the readout names the mode: {}",
             reconstructor_line([10, 100, 0], &state, Some("east"), "nothing", None, 123)
+        );
+        assert!(
+            reconstructor_line(
+                [10, 100, 0],
+                &state,
+                Some("east"),
+                "nothing",
+                Some(("actuallyadditions:lens", 1)),
+                123
+            )
+            .contains("lens actuallyadditions:lens x1"),
+            "the readout names the installed lens"
         );
     }
 

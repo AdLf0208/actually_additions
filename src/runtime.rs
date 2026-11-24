@@ -1078,6 +1078,31 @@ impl Reconstructor {
     }
 }
 
+/// The four items 1.3.26 declares as `ILensItem`s, in the order of the jar's laser ring:
+/// `lens → lens_of_color → lens_of_detonation → lens_of_certain_death → lens`. The port carries
+/// all four; the three non-plain lenses' own beam effects are a later slice (their acceptance here
+/// is faithful to `getLens`, but the beam uses the default conversion rule for them).
+pub const LENS_ITEMS: [&str; 4] = [
+    "actuallyadditions:lens",
+    "actuallyadditions:lens_of_color",
+    "actuallyadditions:lens_of_detonation",
+    "actuallyadditions:lens_of_certain_death",
+];
+
+/// Whether `item` is one of the mod's lens items (`instanceof ILensItem` upstream).
+#[must_use]
+pub fn is_lens(item: &str) -> bool {
+    LENS_ITEMS.contains(&item)
+}
+
+/// Upstream `ILensItem`: a right click fills the reconstructor's empty lens slot only with one of
+/// 1.3.26's lens items (`TileEntityAtomicReconstructor.getLens`); an occupied slot refuses a second
+/// lens, and a non-lens is refused by an empty one.
+#[must_use]
+pub fn lens_slot_accepts(slot: Option<&str>, item: &str) -> bool {
+    slot.is_none() && is_lens(item)
+}
+
 /// What a placed reconstructor comes back with: its buffer clamped and its cycle inside the
 /// machine's own range (a stale item can name any int).
 #[must_use]
@@ -1764,6 +1789,22 @@ mod reconstructor_tests {
         );
         // A stale item can name any int, but the buffer, the cycle and the mode come back in range.
         assert_eq!(restored_reconstructor(-1, -7, false), Reconstructor::new());
+    }
+
+    #[test]
+    fn a_lens_fills_the_empty_slot_and_a_second_lens_is_refused() {
+        assert!(
+            lens_slot_accepts(None, "actuallyadditions:lens"),
+            "a lens fills the empty slot"
+        );
+        assert!(
+            !lens_slot_accepts(Some("actuallyadditions:lens"), "actuallyadditions:lens"),
+            "an occupied slot refuses a second lens"
+        );
+        assert!(
+            !lens_slot_accepts(None, "minecraft:stick"),
+            "a non-lens is refused by the empty slot"
+        );
     }
 }
 
