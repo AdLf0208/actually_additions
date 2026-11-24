@@ -103,6 +103,12 @@ LENS_ITEMS = LENS_LASER_RECIPES
 # not this package's data and would name ids it cannot resolve, so only the top level is carried.
 MINER_LENS = "lens_of_the_miner"
 MINING_LENS_RECIPE_DIR = "mininglens"
+# Slice 12 (0.2.13): the killer lens item (`ActuallyItems.LENS_OF_THE_KILLER`, whose getLens() is
+# LensKiller). Its jar craft keys on an enchanted book with a `neoforge:components` ingredient and
+# a diamond sword, neither of which this package's recipe table can express, so — as for the miner —
+# only the item is carried and the in-game rig gives it. There is no `laser/` conversion for it in
+# the jar, so it stays out of the 5,000 CF lens ring.
+KILLER_LENS = "lens_of_the_killer"
 # The two jar tags every top-level mining-lens recipe keys on, plus the NeoForge convention tag
 # the three nether recipes key on (26.3 ships no `c:` namespace, so it is declared here).
 ORE_REPLACEABLE_TAGS = ("stone_ore_replaceables", "deepslate_ore_replaceables")
@@ -630,6 +636,21 @@ def main() -> None:
         json.dumps({"values": list(NETHERRACK_GROUND_TAG)}, indent=2) + "\n",
     )
 
+    # (0.2.13) the killer lens item, exactly as the miner's: its `items/` entry, model and texture
+    # from the jar, its Horizon declaration with `stacksTo(1)`, and the creative tab below. Its
+    # crafting recipe is deliberately not carried (it needs an enchanted book with components) and
+    # the jar has no laser conversion into or out of it.
+    for source, target in (
+        (f"assets/actuallyadditions/items/{KILLER_LENS}.json", f"items/{KILLER_LENS}.json"),
+        (f"assets/actuallyadditions/models/item/{KILLER_LENS}.json", f"models/item/{KILLER_LENS}.json"),
+        (f"assets/actuallyadditions/textures/item/{KILLER_LENS}.png", f"textures/item/{KILLER_LENS}.png"),
+    ):
+        copy(CARRY / source, assets / target)
+    write(
+        data / f"horizon/item/{KILLER_LENS}.json",
+        json.dumps({"template": "minecraft:stick", "max_stack_size": 1}, indent=2) + "\n",
+    )
+
     # Upstream's creative tab is code; one tab for the slice, with the two
     # crafting-chain pieces the machine recipes are made of.
     write(
@@ -638,7 +659,7 @@ def main() -> None:
             {
                 "title": "itemGroup.actuallyadditions.machines",
                 "icon": "actuallyadditions:coal_generator",
-                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)] + [f"actuallyadditions:{GEM}"] + [f"actuallyadditions:{i}" for i in ITEMS] + [f"actuallyadditions:{RECONSTRUCTOR}", f"actuallyadditions:{CRYSTAL}"] + [f"actuallyadditions:{i}" for i in LENS_ITEMS] + [f"actuallyadditions:{MINER_LENS}"],
+                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)] + [f"actuallyadditions:{GEM}"] + [f"actuallyadditions:{i}" for i in ITEMS] + [f"actuallyadditions:{RECONSTRUCTOR}", f"actuallyadditions:{CRYSTAL}"] + [f"actuallyadditions:{i}" for i in LENS_ITEMS] + [f"actuallyadditions:{MINER_LENS}", f"actuallyadditions:{KILLER_LENS}"],
             },
             indent=2,
         )

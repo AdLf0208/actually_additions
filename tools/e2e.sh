@@ -91,6 +91,12 @@
 #    sighted stone STAYS — upstream's `ExplosionInteraction.NONE` keeps blocks at this pin, so the
 #    brief's proposed crater is not artefact-true. The default-lens differential keeps 250,000 CF,
 #    starts no fire and keeps its stone;
+#  - (0.2.13) the killer lens's own beam effect: the harness-given `lens_of_the_killer` (NOT
+#    `lens_of_certain_death`, which is plain LensDeath) makes a 3,500 CF shot hurt a NoAI cow in the
+#    sighted air cell for 20 damage through a fake player's `player_attack` at 2,500 CF, killing it
+#    (health 0, still briefly listed by `ctl entities` at this pin, so the parsed assertion is on
+#    health > 0) and emptying the buffer, while the readout names `killer @ 2500 CF` at a solid
+#    sight; the default-lens differential keeps its cow and spends only the 1,000 CF gate;
 #  - with CONTROL_GAME set, an unmodded game on the same scratch home knows neither id
 #    (`setblock` answers `Unknown block type`), so the ids are the package's.
 #
@@ -106,12 +112,13 @@
 # the right-click makes false, so it must fail too; SELFTEST=lens-effect flips the miner assertion
 # ("the stone stays"), which the 60,000 CF ore swap makes false; SELFTEST=detonation flips the
 # blast assertion ("nothing was spent and no fire was lit"), which the 250,000 CF blast makes
-# false. NEGATIVE=1 flips the crafting phase's recipe-book
+# false; SELFTEST=killer flips the kill assertion ("the cow survives and only the gate is spent"),
+# which the 2,500 CF fake-player hit makes false. NEGATIVE=1 flips the crafting phase's recipe-book
 # assertion ("the Coal Generator's recipe is not unlocked"), which is the pre-0.2.4 state, so it must
 # fail on this package.
 #
 #   GAME=<launcher-built horizon-client> [CTL=<horizon-ctl>] [CONTROL_GAME=<unmodded game>] \
-#       [SELFTEST=1|drops|ore|laser|item|pulse|lens|lens-effect|detonation] [NEGATIVE=1] tools/e2e.sh
+#       [SELFTEST=1|drops|ore|laser|item|pulse|lens|lens-effect|detonation|killer] [NEGATIVE=1] tools/e2e.sh
 set -euo pipefail
 export LC_ALL=C
 
@@ -2019,9 +2026,116 @@ case "$(block_state_of "$DIFF_DET_TARGET" 100 "$DET_Z")" in
     *) fail "the plain lens changed its sighted stone" ;;
 esac
 
+ctl command "kill @e[type=minecraft:cow]" >/dev/null
+ctl command "kill @e[type=item]" >/dev/null
+ctl wait 4
+
+# ---------------------------------------------------------------------------
+# P: the killer lens's own beam effect (0.2.13)
+# ---------------------------------------------------------------------------
+echo "== the killer lens's own beam effect (0.2.13) =="
+# `LensKiller extends LensDeath` (cd9d9c6, LensKiller.java:21-30, LensDeath.java:29-60): the cell
+# `AABB(hit.x, hit.y, hit.z, hit.x+1, hit.y+1, hit.z+1)` is asked for living entities BEFORE the
+# `!hitState.isAir()` return, each is hurt for 20 from `playerAttack(FakePlayerFactory.getMinecraft)`
+# at 2,500 CF, reach 15. The pin has no DamageSource object; `EntityRef::hurt` with the string
+# `minecraft:player_attack` and a connectionless fake player as `causing` is the artefact's source.
+# The item is `lens_of_the_killer` — `lens_of_certain_death` is plain LensDeath (350 CF) — and its
+# craft needs an enchanted book, so the rig gives it.
+KILL_Z=70
+ctl command "fill -10 99 65 22 99 75 minecraft:stone" >/dev/null
+ctl command "fill -10 100 65 22 110 75 minecraft:air" >/dev/null
+cows() { ctl entities 12 cow | jq '[.entities[] | select(.type == "minecraft:cow")] | length'; }
+# A dead cow stays in the entity list for a while at this pin (its health reads 0.0), so "gone"
+# is asserted as "no cow with health > 0" — a parsed value, not the absence of a chat message.
+cows_alive() { ctl entities 12 cow | jq '[.entities[] | select(.type == "minecraft:cow") | select((.health // 0) > 0)] | length'; }
+
+# First the readout, with a solid sight and no cow: it proves the killer lens id selects its own
+# rule and names the artefact's price. (A cow in an air cell makes the sight read "nothing", so the
+# price cannot be asserted in the kill phase itself.)
+READ_X=0
+ctl command "setblock $READ_X 100 $KILL_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $((READ_X + 2)) 100 $KILL_Z minecraft:stone" >/dev/null
+ctl command "give @s actuallyadditions:lens_of_the_killer 1" >/dev/null
+ctl wait 4
+echo "  the killer lens is harness-given (its craft needs an enchanted book): $(ctl inventory | jq -c '.held.item // empty')"
+click_with actuallyadditions:lens_of_the_killer "$READ_X" 100 "$KILL_Z"
+line=$(info "$READ_X" 100 "$KILL_Z")
+echo "  after the killer-lens click: $line"
+case "$line" in
+    *"lens actuallyadditions:lens_of_the_killer x1"*) ;;
+    *) fail "the killer lens did not fill the slot: $line" ;;
+esac
+case "$(sight_of "$line")" in
+    *"killer @ 2500 CF"*) ;;
+    *) fail "the readout did not name the killer's price: $(sight_of "$line")" ;;
+esac
+ctl command "setblock $READ_X 100 $KILL_Z minecraft:air" >/dev/null
+ctl command "setblock $((READ_X + 2)) 100 $KILL_Z minecraft:air" >/dev/null
+ctl command "clear @s" >/dev/null
+
+# The kill: a NoAI cow hovering in the sighted AIR cell (feet at y=100, body y=100..101.4), so the
+# cell box intersects it. Upstream hurts entities in air cells too, then lets the beam walk on.
+KILL_X=4
+KILL_TARGET=$((KILL_X + 2))
+ctl command "setblock $KILL_X 100 $KILL_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "summon minecraft:cow $((KILL_TARGET)).5 100 $(centre "$KILL_Z") {NoAI:1b,Silent:1b,PersistenceRequired:1b}" >/dev/null
+ctl wait 6
+COW_BEFORE=$(cows)
+[ "$COW_BEFORE" -ge 1 ] || fail "the cow to kill was not found"
+echo "  cows before the killer shot: $COW_BEFORE : $(ctl entities 12 cow | jq -c '[.entities[] | {id, type, pos, health}]')"
+ctl tp "$((KILL_X + 6)).5" 100 "$(centre "$KILL_Z")" >/dev/null
+click_with actuallyadditions:lens_of_the_killer "$KILL_X" 100 "$KILL_Z"
+line=$(info "$KILL_X" 100 "$KILL_Z")
+case "$line" in
+    *"lens actuallyadditions:lens_of_the_killer x1"*) ;;
+    *) fail "the killer lens did not fill the kill machine's slot: $line" ;;
+esac
+charge "$KILL_X" 100 "$KILL_Z" 3500 >/dev/null
+# A 100-tick cycle is position-phased, so a fixed wait can sample either side of the shot.
+for _ in $(seq 1 60); do
+    ctl wait 4 >/dev/null
+    KILL_LINE=$(info "$KILL_X" 100 "$KILL_Z")
+    [ "$(energy_of "$KILL_LINE")" = 3500 ] || break
+done
+KILL_ENERGY=$(energy_of "$KILL_LINE")
+KILL_COWS=$(cows_alive)
+echo "  after the killer shot: $KILL_LINE"
+echo "  cows after the killer shot: $KILL_COWS alive (before $COW_BEFORE) : $(ctl entities 12 cow | jq -c '[.entities[] | {id, type, pos, health}]')"
+if [ "$SELFTEST" = killer ]; then
+    # The flipped assertion is the differential's outcome: cow alive, only the 1,000 CF gate spent.
+    if [ "$KILL_COWS" -ge 1 ] && [ "$KILL_ENERGY" = 2500 ]; then
+        fail "SELFTEST killer: the flipped assertion passed (no kill), so it proves nothing"
+    fi
+    fail "SELFTEST killer: the cow's health is 0 and the buffer read 0 (the real assertion); the flipped assertion 'the cow survives and 2500 CF is left' fails, so the real one can fail"
+fi
+[ "$KILL_COWS" -eq 0 ] || fail "the killer lens did not kill the cow ($KILL_COWS still alive)"
+[ "$KILL_ENERGY" = 0 ] || fail "the killer did not spend its 2,500 CF: $KILL_LINE"
+
+# Differential: the same rig with the plain lens keeps the cow and spends only the gate.
+DIFF_KILL_X=10
+DIFF_KILL_TARGET=$((DIFF_KILL_X + 2))
+ctl command "setblock $DIFF_KILL_X 100 $KILL_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "summon minecraft:cow $((DIFF_KILL_TARGET)).5 100 $(centre "$KILL_Z") {NoAI:1b,Silent:1b,PersistenceRequired:1b}" >/dev/null
+ctl wait 6
+DIFF_COW_BEFORE=$(cows_alive)
+[ "$DIFF_COW_BEFORE" -ge 1 ] || fail "the differential cow was not found"
+ctl tp "$((DIFF_KILL_X + 6)).5" 100 "$(centre "$KILL_Z")" >/dev/null
+charge "$DIFF_KILL_X" 100 "$KILL_Z" 3500 >/dev/null
+ctl wait 60 >/dev/null
+DIFF_KILL_LINE=$(info "$DIFF_KILL_X" 100 "$KILL_Z")
+if [ "$(energy_of "$DIFF_KILL_LINE")" = 3500 ]; then
+    ctl wait 60 >/dev/null
+    DIFF_KILL_LINE=$(info "$DIFF_KILL_X" 100 "$KILL_Z")
+fi
+DIFF_COW_AFTER=$(cows_alive)
+echo "  the plain lens's shot: $DIFF_KILL_LINE"
+echo "  cows alive after the plain lens's shot: $DIFF_COW_BEFORE -> $DIFF_COW_AFTER : $(ctl entities 12 cow | jq -c '[.entities[] | {id, type, pos, health}]')"
+[ "$DIFF_COW_AFTER" -eq "$DIFF_COW_BEFORE" ] || fail "the plain lens killed the cow ($DIFF_COW_BEFORE -> $DIFF_COW_AFTER)"
+[ "$(energy_of "$DIFF_KILL_LINE")" = 2500 ] || fail "the plain lens spent more than the 1,000 CF gate: $DIFF_KILL_LINE"
+
 ctl command "tp @s 0.5 100 3.5" >/dev/null
 ctl wait 6
 
 control
 
-echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), the reconstructor's redstone mode started off and a stick left it there while a click holding a redstone torch switched it to pulse mode without placing the torch, pulse mode neither ran its cycle nor fired without a signal, a redstone block beside the machine fired exactly one 1,040 CF shot on each of two rising edges (two crystals, a 2,080 CF buffer emptied, the cycle untouched) while the same machine without the toggle stayed frozen on the same signal and spent nothing, and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed; the lens (eight glass and a Black Quartz, all nine consumed) crafted and right-clicked into the reconstructor's empty slot (info read lens actuallyadditions:lens x1), a second lens was refused by the occupied slot and a stick was refused by the slot, and a dropped lens in the beam became lens_of_color for the 1,000 CF gate plus the 5,000 CF ring conversion (40 CF left) while a dropped stick stayed and spent only its gate, and the harness-given miner lens in the slot made a 61,000 CF shot swap the sighted stone for one of the nine mining-lens ores (the block read back with ctl block) while a fresh default-lens machine kept its stone and spent only its gate, and the harness-given detonator lens in the slot made a 251,000 CF shot set off the artefact's sourceless radius-10 fiery blast — spending 250,000 CF and lighting fire in the arena while **keeping** the sighted stone, because upstream's ExplosionInteraction.NONE keeps blocks at this pin — whereas a fresh default-lens machine kept its 250,000 CF, started no fire and kept its stone"
+echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), the reconstructor's redstone mode started off and a stick left it there while a click holding a redstone torch switched it to pulse mode without placing the torch, pulse mode neither ran its cycle nor fired without a signal, a redstone block beside the machine fired exactly one 1,040 CF shot on each of two rising edges (two crystals, a 2,080 CF buffer emptied, the cycle untouched) while the same machine without the toggle stayed frozen on the same signal and spent nothing, and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed; the lens (eight glass and a Black Quartz, all nine consumed) crafted and right-clicked into the reconstructor's empty slot (info read lens actuallyadditions:lens x1), a second lens was refused by the occupied slot and a stick was refused by the slot, and a dropped lens in the beam became lens_of_color for the 1,000 CF gate plus the 5,000 CF ring conversion (40 CF left) while a dropped stick stayed and spent only its gate, and the harness-given miner lens in the slot made a 61,000 CF shot swap the sighted stone for one of the nine mining-lens ores (the block read back with ctl block) while a fresh default-lens machine kept its stone and spent only its gate, and the harness-given detonator lens in the slot made a 251,000 CF shot set off the artefact's sourceless radius-10 fiery blast — spending 250,000 CF and lighting fire in the arena while **keeping** the sighted stone, because upstream's ExplosionInteraction.NONE keeps blocks at this pin — whereas a fresh default-lens machine kept its 250,000 CF, started no fire and kept its stone, and the harness-given killer lens made a 3,500 CF shot hurt a NoAI cow in the sighted air cell for 20 damage from a fake player's player_attack at 2,500 CF (the cow's health 0, the buffer 0, the readout naming killer @ 2500 CF at a solid sight) while the default-lens differential kept its cow and spent only the 1,000 CF gate"

@@ -1,5 +1,44 @@
 # Validation
 
+**0.2.13 (2026-11-24, pin `0a875da`)** — slice 12: the **killer lens's own beam effect**. Every
+cargo step was forwarded to the remote runner (`REMOTE_HOST` defaults to `deepseek@192.168.1.115`,
+whose hostname is `AdLf-PC`; no `BUILD_LOCAL=1` for the cargo steps); the launcher build ran in a
+**local** slot because the far box lacks `libxkbcommon-x11.so.0`. The artefact is `LensKiller extends
+LensDeath` (`cd9d9c63`): 2,500 CF per entity after the 1,000 CF gate, 20 damage through
+`playerAttack(FakePlayerFactory.getMinecraft)`, the hit cell's `AABB` queried before the air check,
+reach 15, stop on non-air. The **lens item is `actuallyadditions:lens_of_the_killer`** —
+`lens_of_certain_death` is plain `LensDeath` (350 CF). First gate: `EntityRef::hurt` and the
+fake-player factory both exist; the pin has no `DamageSource` object, so the source is the
+`minecraft:player_attack` type string with a connectionless fake as its `causing` handle.
+
+| Check | Command | Result |
+|---|---|---|
+| rules (red) | `cargo test --offline`, the killer rules undefined | **12 errors**, `cannot find value LENS_OF_THE_KILLER`, `cannot find value KILLER_LENS_ENERGY`, `cannot find value KILLER_DAMAGE`, `no variant … named Killer`, `cannot find function killer_stop` — `evidence/actuallyadditions/sdk-test-red-killer.log` |
+| tests | `cargo test --offline` | **70 passed / 0 failed** (51 runtime incl. 4 json and 28 reconstructor, 19 glue), `Compiling actuallyadditions v0.2.13` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` | `7 recipe(s), 36 craftable, 0 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **181,126 B** both, `cmp` identical, sha256 `5812fce939c1a12b45975812e134c459f42d6cc19c76f43fd8d306af68f2c39c`, **205 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.13 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 181,126 bytes, EXIT 0 — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1**, `package matches the tree`, R9 rows green — `verify-gate-0.2.13.log` |
+| launcher build | stale 0.2.13 `native-*` tags moved aside, `native-0a875da-ebec6a089275` | `Compiling actuallyadditions (1 of 1)` — `launcher-build-0.2.13.log` |
+| in-game | `tools/e2e.sh` (`--offscreen`, the final package's launcher build) | `PASS` + `EXIT:0` — `e2e-launcher.log` (first line names the delivered sha) |
+| counterfactual | `SELFTEST=killer` | `FAIL:` + `EXIT:1` — `e2e-launcher-selftest-killer.log` |
+| counterfactual | `SELFTEST={detonation,lens-effect,lens,1,drops,ore,laser,item,pulse}` | each `FAIL:` + `EXIT:1` — the nine earlier selftest logs |
+| counterfactual | `NEGATIVE=1` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour)` + `EXIT:1` — `e2e-launcher-negative.log` |
+| control | `CONTROL=1` (the same Nightly, no package) | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=13 ok=13 missing-exit=0 bad-exit=0`, exit 0 — `e2e-audit-0.2.13.log` |
+
+The killer phase's own lines (`e2e-launcher.log`): the harness-given lens fills the slot and the
+readout names `minecraft:stone -> killer @ 2500 CF`; a 3,500 CF shot hurts a NoAI cow in the sighted
+**air** cell (the cell box is queried before the air check) — the cow's parsed health goes to 0 and
+the buffer reads 0; the differential default-lens machine keeps its cow at health 10 and 2,500 CF.
+A dead cow stays in `ctl entities` for a while at this pin, so the assertion is on parsed
+`health > 0`, not on the list being empty. `SELFTEST=killer` flips it to "the cow survives and
+2,500 CF is left", which this package makes false. The 12 earlier legs are unchanged and re-proved.
+
 **0.2.12 (2026-11-24, pin `0a875da`)** — slice 11: the **detonator lens's own beam effect**. Every
 cargo step was forwarded to the remote runner (`REMOTE_HOST=AdLf-PC`, no `BUILD_LOCAL=1` for the
 cargo steps); the launcher build ran in a **local** slot because the far box lacks

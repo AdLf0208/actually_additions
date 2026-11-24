@@ -24,12 +24,13 @@ use mod_api::{
 use crate::runtime::{
     CONVERTED_MARKER, CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, Conversion, CrushResult,
     Crusher, CrushingRecipe, DETONATION_BLAST_RADIUS, DETONATION_LENS_ENERGY, GENERATOR_CAPACITY,
-    GENERATOR_MAX_EXTRACT, Generator, LaserRecipe, LensEffect, MINING_LENS_ENERGY,
-    MiningLensRecipe, RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_MAX_INSERT, RECONSTRUCTOR_TICKS,
-    Reconstructor, Signal, Step, bonus_for, can_crush, clamp_energy, comparator_strength,
-    conversion_plane, convert, detonation_stop, facing_for_placement, is_fuel, is_lens,
-    item_scan_box, items_possible, lens_slot_accepts, may_convert, pick_weighted,
-    reconstructor_comparator, restored_crusher, restored_generator, restored_reconstructor,
+    GENERATOR_MAX_EXTRACT, Generator, KILLER_DAMAGE, KILLER_LENS_ENERGY, LaserRecipe, LensEffect,
+    MINING_LENS_ENERGY, MiningLensRecipe, RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_MAX_INSERT,
+    RECONSTRUCTOR_TICKS, Reconstructor, Signal, Step, bonus_for, can_crush, clamp_energy,
+    comparator_strength, conversion_plane, convert, detonation_stop, facing_for_placement, is_fuel,
+    is_lens, item_scan_box, items_possible, killer_stop, lens_slot_accepts, may_convert,
+    pick_weighted, reconstructor_comparator, restored_crusher, restored_generator,
+    restored_reconstructor,
 };
 
 /// The generator block; its block entity type carries the same path.
@@ -819,6 +820,7 @@ fn fire_beam(
             }
             LensEffect::Mining => mining_step(host, level, hit, state),
             LensEffect::Detonation => detonation_step(host, level, hit, state),
+            LensEffect::Killer => killer_step(host, level, hit, state),
         };
         if solid || distance == effect.distance() {
             break;
@@ -868,6 +870,67 @@ fn detonation_step(
         }
     }
     detonation_stop(air)
+}
+
+/// A stable, version-4-shaped key for the fake player a killer shot borrows. Derived from the
+/// hit cell so two machines firing in the same tick do not share the game's fake-player map;
+/// the fake is removed again at the end of the step (the same pattern `industrialforegoing` uses).
+fn killer_fake_uuid(hit: [i32; 3]) -> u128 {
+    let mut hash: u128 = 0x9e37_79b9_7f4a_7c15_6a09_e667_f3bc_c908;
+    for byte in hit.into_iter().flat_map(i32::to_le_bytes) {
+        hash ^= u128::from(byte);
+        hash = hash.wrapping_mul(0x0000_0000_0100_0000_0000_0000_0000_01b3_u128);
+    }
+    (hash & !(0xf_u128 << 76)) | (0x4_u128 << 76) | (0x2_u128 << 62)
+}
+
+/// `LensKiller.invoke` (through `LensDeath.invoke`) at one beam step: every living entity in the
+/// sighted block's cell is hurt for 20 damage by a fake player's `playerAttack`, at 2,500 CF each.
+/// Upstream queries the cell's entities **before** the `!hitState.isAir()` return, so a cow in an
+/// air cell is hurt and the beam then walks on; a solid sight stops it after that hit. The pin has
+/// no NeoForge `DamageSource`, but it has the fake player and `EntityRef::hurt`: the source is the
+/// string `minecraft:player_attack` with the fake as its causing entity (vanilla `playerAttack`
+/// names no direct attacker), which keeps the player credit the artefact's source carries.
+fn killer_step(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    hit: [i32; 3],
+    state: &mut Reconstructor,
+) -> bool {
+    let Some(id) = block_id(&*host, level, hit) else {
+        return killer_stop(true);
+    };
+    let air = is_air(&id);
+    let min = [f64::from(hit[0]), f64::from(hit[1]), f64::from(hit[2])];
+    let max = [min[0] + 1.0, min[1] + 1.0, min[2] + 1.0];
+    let Some(entities) = level.entities_in(&*host, min, max) else {
+        return killer_stop(air);
+    };
+    let victims: Vec<_> = entities
+        .into_iter()
+        .filter(|entity| host.living(*entity).is_some())
+        .collect();
+    if !victims.is_empty()
+        && state.can_afford(KILLER_LENS_ENERGY)
+        && let Some(fake) = host.fake_player(level, killer_fake_uuid(hit), "[AA]")
+    {
+        let attacker = fake.entity();
+        for entity in victims {
+            if !state.can_afford(KILLER_LENS_ENERGY) {
+                break;
+            }
+            state.spend(KILLER_LENS_ENERGY);
+            let _ = entity.hurt(
+                &mut *host,
+                "minecraft:player_attack",
+                KILLER_DAMAGE,
+                None,
+                Some(attacker),
+            );
+        }
+        let _ = fake.remove_fake(&mut *host);
+    }
+    killer_stop(air)
 }
 
 /// `LensMining.invoke` at one beam step: the sighted block (not the 3x3 plane) is swapped for a
@@ -1836,6 +1899,9 @@ fn reconstructor_sight(
             },
             LensEffect::Detonation => {
                 format!("{block} -> detonation @ {DETONATION_LENS_ENERGY} CF")
+            }
+            LensEffect::Killer => {
+                format!("{block} -> killer @ {KILLER_LENS_ENERGY} CF")
             }
         };
     }

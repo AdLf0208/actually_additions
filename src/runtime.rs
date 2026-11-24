@@ -1078,16 +1078,18 @@ impl Reconstructor {
     }
 }
 
-/// The four items 1.3.26 declares as `ILensItem`s, in the order of the jar's laser ring:
-/// `lens → lens_of_color → lens_of_detonation → lens_of_certain_death → lens`. The port carries
-/// all four; the three non-plain lenses' own beam effects are a later slice (their acceptance here
-/// is faithful to `getLens`, but the beam uses the default conversion rule for them).
-pub const LENS_ITEMS: [&str; 5] = [
+/// The lens `ILensItem`s this package carries: the jar's 5,000 CF laser ring
+/// (`lens → lens_of_color → lens_of_detonation → lens_of_certain_death → lens`), the miner lens and
+/// the killer lens. `lens_of_disenchanting` is the one remaining lens item not carried (its own
+/// effect is a separate rule path). Every carried item's `getLens()` is honoured by [`LensEffect`];
+/// `lens_of_certain_death` is plain `LensDeath` (350 CF), not `LensKiller`.
+pub const LENS_ITEMS: [&str; 6] = [
     "actuallyadditions:lens",
     "actuallyadditions:lens_of_color",
     "actuallyadditions:lens_of_detonation",
     "actuallyadditions:lens_of_certain_death",
     LENS_OF_THE_MINER,
+    LENS_OF_THE_KILLER,
 ];
 
 /// Whether `item` is one of the mod's lens items (`instanceof ILensItem` upstream).
@@ -1137,9 +1139,38 @@ pub fn detonation_stop(air: bool) -> bool {
     !air
 }
 
+/// `LensKiller.getUsePerEntity` (`LensKiller.java:28-30`): the CF the killer lens spends **per
+/// entity it hits**, on top of the shot's 1,000 CF gate, so a one-cow shot needs 3,500 CF.
+pub const KILLER_LENS_ENERGY: i32 = 2_500;
+
+/// The damage `LensKiller.onAttacked` deals (`LensKiller.java:23`), through
+/// `entity.damageSources().playerAttack(FakePlayerFactory.getMinecraft(level))`. The pin has no
+/// NeoForge `DamageSource` object: the port names the type `minecraft:player_attack` and passes a
+/// connectionless fake player as its causing entity (see `support::killer_step`).
+pub const KILLER_DAMAGE: f32 = 20.0;
+
+/// `LensKiller.getDistance` is inherited from `LensDeath` (`LensDeath.java:58-60`): the killer's
+/// beam walks fifteen blocks, not the default lens's ten.
+pub const KILLER_LENS_DISTANCE: i32 = 15;
+
+/// The behaviour lens whose `ItemLens.getLens()` is upstream's `LensKiller`. This is
+/// `actuallyadditions:lens_of_the_killer` (`ActuallyItems.java:120` →
+/// `ActuallyAdditionsAPI.lensEvenMoarDeath`); `actuallyadditions:lens_of_certain_death` wraps the
+/// *plain* `LensDeath` and is deliberately not the killer. Its craft needs an enchanted book, so
+/// the in-game rig gives the item, as for the miner and detonator.
+pub const LENS_OF_THE_KILLER: &str = "actuallyadditions:lens_of_the_killer";
+
+/// `LensDeath.invoke` returns `true` for any non-air sight (the beam stops even after an empty
+/// hit) and `false` for air (it keeps walking). The same rule as the detonator's, kept as its own
+/// named pure rule so the killer's stop is pinned independently.
+#[must_use]
+pub fn killer_stop(air: bool) -> bool {
+    !air
+}
+
 /// Which `Lens.invoke` a held lens item selects (`TileEntityAtomicReconstructor.getLens` →
-/// `MethodHandler.invokeReconstructor`). The miner, detonator, killer and disenchanting lenses are
-/// distinct `invoke` paths; the first two are carried, the others recorded as gaps.
+/// `MethodHandler.invokeReconstructor`). The miner, detonator and killer lenses are distinct
+/// `invoke` paths; the disenchanting lens remains a gap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LensEffect {
     /// `LensConversion`: the default conversion of the plane and the beam's dropped items.
@@ -1148,6 +1179,8 @@ pub enum LensEffect {
     Mining,
     /// `LensDetonation`: a sourceless, fiery radius-10 blast at the sighted block.
     Detonation,
+    /// `LensKiller`: hurt the living entities in the sighted cell with a fake player's attack.
+    Killer,
 }
 
 impl LensEffect {
@@ -1156,17 +1189,20 @@ impl LensEffect {
         match item {
             LENS_OF_THE_MINER => Self::Mining,
             LENS_OF_DETONATION => Self::Detonation,
+            LENS_OF_THE_KILLER => Self::Killer,
             _ => Self::Conversion,
         }
     }
 
     /// Upstream `Lens.getDistance`: the default conversion lens and the miner reach ten blocks;
-    /// `LensDetonation.getDistance` returns thirty (three times as far).
+    /// `LensDetonation.getDistance` returns thirty (three times as far) and the killer inherits
+    /// `LensDeath`'s fifteen.
     pub fn distance(self) -> i32 {
         match self {
             Self::Conversion => RECONSTRUCTOR_LENS_DISTANCE,
             Self::Mining => MINING_LENS_DISTANCE,
             Self::Detonation => DETONATION_LENS_DISTANCE,
+            Self::Killer => KILLER_LENS_DISTANCE,
         }
     }
 }
@@ -2148,6 +2184,78 @@ mod reconstructor_tests {
         );
         assert!(
             !detonation_stop(true),
+            "an air sight returns false, so the beam keeps walking"
+        );
+    }
+
+    #[test]
+    fn a_killer_lens_is_accepted_by_the_slot_and_selects_the_killer_effect() {
+        assert!(
+            lens_slot_accepts(None, LENS_OF_THE_KILLER),
+            "the killer lens is an ILensItem, so the empty slot accepts it"
+        );
+        assert_eq!(
+            LensEffect::of(LENS_OF_THE_KILLER),
+            LensEffect::Killer,
+            "its getLens() is LensKiller, not the default conversion"
+        );
+        assert_eq!(
+            LensEffect::of("actuallyadditions:lens_of_certain_death"),
+            LensEffect::Conversion,
+            "that item is plain LensDeath (350 CF), not LensKiller"
+        );
+    }
+
+    #[test]
+    fn the_killer_costs_two_thousand_five_hundred_cf_per_entity_and_reaches_fifteen_blocks() {
+        assert_eq!(
+            LENS_OF_THE_KILLER, "actuallyadditions:lens_of_the_killer",
+            "ActuallyItems.LENS_OF_THE_KILLER wraps ActuallyAdditionsAPI.lensEvenMoarDeath"
+        );
+        assert_eq!(
+            KILLER_LENS_ENERGY, 2_500,
+            "LensKiller.getUsePerEntity, per entity, on top of the shot's gate"
+        );
+        assert_eq!(KILLER_DAMAGE, 20.0, "the fake-player playerAttack damage");
+        assert_eq!(
+            LensEffect::Killer.distance(),
+            15,
+            "LensDeath.getDistance, inherited by LensKiller"
+        );
+        let mut state = Reconstructor {
+            energy: 3_500,
+            ..Reconstructor::new()
+        };
+        assert_eq!(
+            state.fire(),
+            Some(2_500),
+            "the 1,000 CF shot gate is paid before the lens's invoke"
+        );
+        assert!(
+            state.can_afford(KILLER_LENS_ENERGY),
+            "the gate leaves the killer's own 2,500 CF"
+        );
+        state.spend(KILLER_LENS_ENERGY);
+        assert_eq!(state.energy, 0, "the kill's own energy is charged");
+        let mut short = Reconstructor {
+            energy: 3_499,
+            ..Reconstructor::new()
+        };
+        assert_eq!(short.fire(), Some(2_499));
+        assert!(
+            !short.can_afford(KILLER_LENS_ENERGY),
+            "3,500 CF total is the exact price: one CF short cannot fire"
+        );
+    }
+
+    #[test]
+    fn the_killer_stops_at_a_solid_sight_and_lets_air_pass() {
+        assert!(
+            killer_stop(false),
+            "invoke returns true for a non-air block, even when no entity was hurt"
+        );
+        assert!(
+            !killer_stop(true),
             "an air sight returns false, so the beam keeps walking"
         );
     }

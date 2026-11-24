@@ -2899,3 +2899,161 @@ non-air sight (`return !hitState.isAir()`). Charge **3,500 CF** (1,000 gate + 2,
 - **Check first:** the killer lens's own craft needs crystals this package lacks, so give the item
   as for the miner and detonator. Out of scope: the disenchanting lens (its book + enchanted-item
   box is a separate rule at 250,000 CF), the GUI, the Double Crusher, the ore's generation.
+
+## Slice 12 (0.2.13, 2026-11-24) — the killer lens's own beam effect
+
+**Family:** `LensKiller extends LensDeath` — the third behaviour lens's own rule path: hurt the
+living entities in each sighted cell for 20 damage from a fake player's `playerAttack`, at 2,500 CF
+a head, on top of the shot's 1,000 CF gate. The lens item, the slot and the lens ring ship already;
+this slice adds the `LensEffect::Killer` branch and carries the one missing lens item.
+
+- **Gap line** (0.2.12 coverage table): *"the killer and disenchanting lens effects — not ported
+  (next slice; distinct rule paths) — `EntityRef::hurt` and item-enchantment edits, each with its
+  own energy and box; both surfaces exist at this pin"*.
+- **Why it fits `machines`:** one more branch in the beam the port already ships, driven by the
+  lens id in the slot it already accepts — no new block, renderer or hook kind.
+- **Pin:** `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` + mixins
+  `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
+
+### The artefact, not the brief (`cd9d9c63`, `LensKiller.java:20-30`, `LensDeath.java:28-60`)
+
+| Rule | Value | Source |
+|---|---|---|
+| lens item | **`actuallyadditions:lens_of_the_killer`** — the brief's `lens_of_certain_death` is *plain* `LensDeath` (350 CF, its own damage type) | `ActuallyItems.java:119-120` → `ActuallyAdditionsAPI.java:91-92` |
+| own energy | `getUsePerEntity() = 2,500` CF **per entity**, after the 1,000 CF gate → charge 3,500 | `LensKiller.java:28-30` |
+| damage | `entity.hurt(entity.damageSources().playerAttack(FakePlayerFactory.getMinecraft(level)), 20)` | `LensKiller.java:21-25` |
+| box | the hit cell `AABB(x,y,z,x+1,y+1,z+1)`; entities are queried **before** the air check | `LensDeath.java:30-38` |
+| stop | `return !hitState.isAir()` — air lets the beam walk on | `LensDeath.java:40` |
+| reach | `getDistance() = 15`, inherited from `LensDeath` | `LensDeath.java:58-60` |
+
+**First gate (passed, before any code):** `EntityRef::hurt` exists at this pin
+(`fn hurt(self, &mut dyn ServerHost, &str damage_type, f32 amount, Option<EntityRef> direct,
+Option<EntityRef> causing) -> Option<bool>`, `surface.json:handle:EntityRef::hurt`), as does the
+fake player (`PlayersServerHost::fake_player(LevelRef, u128, &str) -> Option<PlayerRef>`,
+`PlayerRef::entity`, `PlayerRef::remove_fake`; proved in `ports/industrialforegoing`). The
+**damage-source difference:** there is no NeoForge `DamageSource` object in the SDK, so upstream's
+`playerAttack(fake)` is expressed as the string `minecraft:player_attack` with a connectionless
+fake player as the `causing` entity and `direct = None` (vanilla `playerAttack` names no direct
+attacker). No `blocked(...)`: every surface is real.
+
+### TDD — the red, verbatim
+
+Three rules were written first (`LENS_OF_THE_KILLER`, `KILLER_LENS_ENERGY`, `KILLER_DAMAGE`,
+`killer_stop`, `LensEffect::Killer` absent), `evidence/actuallyadditions/sdk-test-red-killer.log`,
+`cargo test --offline` exit 101:
+
+```text
+error[E0425]: cannot find value `LENS_OF_THE_KILLER` in this scope
+error[E0425]: cannot find value `KILLER_LENS_ENERGY` in this scope
+error[E0425]: cannot find value `KILLER_DAMAGE` in this scope
+error[E0599]: no variant or associated item named `Killer` found for enum `runtime::LensEffect` in the current scope
+error[E0425]: cannot find function `killer_stop` in this scope
+error: could not compile `actuallyadditions` (lib test) due to 12 previous errors
+exit=101
+```
+
+Green after the rules and the glue: **70 passed**, 0 failed (51 `runtime::` incl. 4 json and 28
+reconstructor, 19 `support::`); `Compiling actuallyadditions v0.2.13` in `sdk-test.log`.
+
+### Glue and content
+
+`support::killer_step` reads the hit block's id, asks `LevelRef::entities_in` for the cell box
+**regardless of air**, filters to `host.living(...)` (upstream `getEntitiesOfClass(LivingEntity)`),
+borrows one fake player keyed by the hit cell, and for each affordable entity spends 2,500 CF and
+calls `EntityRef::hurt(host, "minecraft:player_attack", 20.0, None, Some(attacker))`, removing the
+fake at the end. `fire_beam` dispatches `LensEffect::Killer` with its own 15-block reach;
+`reconstructor_sight` names `killer @ 2500 CF`. The dependency-free `Json` reader is untouched (R9
+still passes); no local type or variant collides with the SDK surface (`fits` green on both builds).
+`lens_of_the_killer` is carried as the miner was — its `items/` entry, model, texture, a
+`horizon/item` declaration with `max_stack_size: 1` and a creative-tab row. Its **craft is not
+carried** (a diamond sword, a `lens_of_certain_death` and an enchanted book with a
+`neoforge:components` ingredient the 26.3 recipe table cannot express) and the jar has no
+`laser/` conversion for it; the in-game rig gives the item.
+
+### Ladder (cargo steps forwarded to AdLf-PC, no `BUILD_LOCAL=1`; launcher build local)
+
+| Step | Result |
+|---|---|
+| tests (red first) | 12 compile errors naming the absent killer rules — `sdk-test-red-killer.log` |
+| tests | **70 passed**, 0 failed, `Compiling actuallyadditions v0.2.13` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings`, exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check`, exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` — `7 recipe(s), 36 craftable, 0 blocked, 0 failure(s)` — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice — **181,126 B** both, `cmp` identical, sha256 `5812fce939c1a12b45975812e134c459f42d6cc19c76f43fd8d306af68f2c39c`, **205 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `actuallyadditions 0.2.13 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 181,126 bytes, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` → **1/1**, `package matches the tree` — `verify-gate-0.2.13.log` |
+| launcher build | stale 0.2.13 tags moved aside, `native-0a875da-ebec6a089275`, `Compiling actuallyadditions (1 of 1)` — `launcher-build-0.2.13.log` |
+
+The two `cargo horizon-mod build` outputs were compared at `target/horizon-mod/actuallyadditions.hmod`
+and the winner copied to the port root; the earlier 0.2.12 root file was stale and is replaced.
+
+### Coverage (slice 12)
+
+| Family | State |
+|---|---|
+| `LensKiller`'s cell-box damage | **tested in game** — the harness-given `lens_of_the_killer` in the slot makes a 3,500 CF shot hurt a NoAI cow in the sighted air cell (20 damage → health 0), the buffer reads 0, and the default-lens differential keeps its cow at health 10 with only the 1,000 CF gate spent |
+| the 2,500 CF price and 3,500 CF charge | **tested** — exact price unit-tested (one CF short cannot fire); the differential keeps 2,500 CF after the same charge |
+| the fake-player `player_attack` source | **tested in game** — damage lands (`landed=Some(true)`, health 0, `alive=false` in the probe that found the assertion bug); the pin's type string and causing handle stand in for the artefact's fake-player `DamageSource` |
+| the 15-block reach and stop-on-non-air | **tested in code + readout** — `LensEffect::Killer.distance() == 15`, `killer_stop(false)` true; the `info` sight loop walks the lens's reach and names `killer @ 2500 CF` at a solid sight |
+| damage entities in air cells | **tested** — the cow stood in an air cell; the cell box was queried before the air check, so the beam still killed it and then walked on |
+| the lens's own craft | **not carried** — its enchanted-book ingredient has a `neoforge:components` predicate 26.3 cannot express; the in-game rig gives the item, as for the miner and detonator |
+| the disenchanting lens effect | **not ported (next slice; distinct rule path)** — a book + enchanted-item box at 250,000 CF; the pin's `ItemEnchantments` surface exists but no branch is carried |
+| the GUI, ore generation, comparator, beam visual | unchanged: `blocked(no-single-player-mod-screen)`, `blocked(configured-feature-not-registered)`, printed-not-wired, no packet |
+
+### Deviations and gaps this slice adds
+
+1. **A dead cow remains in `ctl entities` for a while** (health `0.0`, `alive=false` in the engine),
+   so "the cow is gone" is asserted as *no cow with parsed health > 0*, with the full entity JSON
+   printed as evidence. The first run failed at the naive list-count assertion; the code was proved
+   correct by a temporary probe (`landed=Some(true)`, `health=Some(0.0)`, `alive=Some(false)`), the
+   probe was removed, and the assertion was fixed — not the behaviour.
+2. **No NeoForge `DamageSource` object.** The fake is a connectionless `PlayerRef` and the source is
+   the `minecraft:player_attack` type string with the fake as `causing`, `direct = None`; the fake is
+   removed after the step, so a later shot borrows a fresh one.
+3. **The killer lens's craft stays unreachable** (harness-given), as for the miner and detonator.
+
+### Harness facts measured while getting there
+
+1. `ctl entities 12 cow` prints `health` per entity; a killed cow stays listed with `health: 0.0`,
+   so parse the health rather than counting the list.
+2. `ctl logs --lines 80` (the `fail()` dump) shows the game's chat only; a native `eprintln!` is not
+   captured there, so the root-cause probe wrote to a scratch file instead.
+3. A `native-0a875da-*` tag with the same manifest is **reused** by the launcher, so a fresh build
+   needs the old 0.2.13 tags moved out of `versions/` first; `Compiling actuallyadditions (1 of 1)`
+   is the signal that the final package was really compiled into the game.
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+**Changelog (0.2.13):**
+
+> **0.2.13 — the killer lens changes the beam.** The carried `lens_of_the_killer` (not
+> `lens_of_certain_death`, which is plain `LensDeath`) selects its own `LensKiller.invoke` rule:
+> after the 1,000 CF gate, each 3,500 CF shot's beam hurts the living entities in the cells it
+> sights for 20 damage from a fake player's `player_attack` at 2,500 CF a head, reaching fifteen
+> blocks and stopping at any non-air sight; the default lens keeps its conversion. The pin has no
+> NeoForge `DamageSource`, so the connectionless fake player is the `causing` handle of the
+> `minecraft:player_attack` type string — the artefact's source, expressed with the pin's surface.
+> The dead cow's health is asserted through parsed `ctl entities`, since a dead cow remains listed
+> at this pin. 70 unit tests, 13 in-game legs, 205 entries, 181,126 B, sha256 `5812fce9…f255`.
+
+## Next slice (0.2.14)
+
+**Family:** the **disenchanting lens's own beam effect** — the last distinct `Lens.invoke` rule path
+in the gap list. Its artefact shape must be read before promising it: `LensDisenchanting` spends its
+own energy (likely 250,000 CF) on a book + enchanted-item box and edits `ItemEnchantments`, which
+the pin exposes (`surface.json` has `ItemEnchantments`), but the lens item and the enchanted-book
+ingredient are not carried and its craft may need a components predicate 26.3 cannot express.
+
+- **Gap line** (this slice's coverage table): *"the disenchanting lens effect — not ported (next
+  slice; distinct rule path) — a book + enchanted-item box at 250,000 CF; the pin's
+  `ItemEnchantments` surface exists but no branch is carried"*.
+- **In-game assertion that can fail:** carry/give the lens, install it, charge the artefact's total,
+  place an enchanted item (and a plain book) in the sighted cell, fire, and assert with parsed
+  `ctl entities`/`data get` that the enchantments moved onto the book while a default-lens
+  differential leaves both unchanged and spends only the 1,000 CF gate; `SELFTEST=disenchant`
+  inverts it to `EXIT:1`.
+- **Check first:** grep the pin for the exact `ItemEnchantments` handle and for an enchanted-book
+  component write; if either is absent, stop with `blocked(<symbol>)` rather than substituting a
+  plain item swap. Out of scope: the GUI, the Double Crusher, the ore's generation.
