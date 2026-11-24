@@ -1,5 +1,38 @@
 # Validation
 
+**0.2.11 (2026-11-24, pin `0a875da`)** — slice 10: the **miner lens's own beam effect**. Every cargo
+step was forwarded to the remote runner (`REMOTE_HOST=AdLf-PC`, no `BUILD_LOCAL=1`). The launcher
+game was built locally (`Compiling actuallyadditions (1 of 1)`, `native-0a875da-f6e610072fc5`).
+The jar's 20 top-level `mining_lens` recipes, the two `*_ore_replaceables` tags, the
+`c:ore_bearing_ground/netherrack` tag and the miner lens item ship; with it installed a 61,000 CF
+shot swaps the sighted stone for a weighted ore, while the plain lens keeps its stone.
+
+| Check | Command | Result |
+|---|---|---|
+| rules (red) | `cargo test --offline`, the four miner rules at `todo!()` | **60 passed / 4 failed**, four named `not yet implemented`/assertion failures — `evidence/actuallyadditions/sdk-test-red-lens-effect.log` |
+| tests | `cargo test --offline` | **64 passed / 0 failed** (45 runtime incl. 4 json, 19 glue), `Compiling actuallyadditions v0.2.11` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` | `7 recipe(s), 36 craftable, 0 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **174,980 B** both, `cmp` identical, sha256 `b360583de142d0bea5e0036396e4d9149efb9977b0216f1c95d1039c3a069838`, **201 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.11 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 174,980 bytes, EXIT 0 — `check-run-0.2.11.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1**, `package matches the tree`, R9 rows green — `verify-gate-0.2.11.log` |
+| launcher build | stale `native-0a875da-e321921d7f83` removed, `native-0a875da-f6e610072fc5` | `Compiling actuallyadditions (1 of 1)` — `launcher-build-0.2.11.log` |
+| in-game | `tools/e2e.sh` (`--offscreen`, the launcher build of this package) | `PASS` + `EXIT:0` — `e2e-launcher.log` (first line names the delivered sha) |
+| counterfactual | `SELFTEST=lens-effect` | `FAIL: SELFTEST lens-effect: the stone was replaced (the real assertion); the flipped assertion 'the stone stays' fails, so the real one can fail` + `EXIT:1` — `e2e-launcher-selftest-lens-effect.log` |
+| counterfactual | `SELFTEST={lens,1,drops,ore,laser,item,pulse}` | each `FAIL:` + `EXIT:1` — the seven earlier selftest logs |
+| counterfactual | `NEGATIVE=1` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour)` + `EXIT:1` — `e2e-launcher-negative.log` |
+| control | `CONTROL=1` (the same Nightly, no package) | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=11 ok=11 missing-exit=0 bad-exit=0`, exit 0 — `e2e-audit-0.2.11.log` |
+
+The miner phase's own lines: the harness-given miner lens (its craft needs crystals this package
+lacks) fills the slot; a 61,000 CF shot (1,000 gate + 60,000 miner) replaces `minecraft:stone` with
+`minecraft:iron_ore` in the delivered run, read back with `ctl block`; the differential's plain lens
+keeps its stone and spends exactly the gate (60,000 CF left). Three legs first exited 3 when a
+concurrent port's game exhausted memory; re-run one at a time with ≥4 GB free, all green.
+
 **0.2.10 (2026-11-24, pin `0a875da`)** — the **lens items and the lens slot**. Every cargo step
 was forwarded to the second box (`build-slot: forwarding … to the remote runner`,
 `REMOTE_HOST=AdLf-PC`); no `BUILD_LOCAL=1`. The launcher game was built locally so the

@@ -30,7 +30,9 @@ The rule this tool enforces:
 The custom types' files live in their own folders. ``recipe/laser/*.json`` (0.2.6) are
 checked too, including their **result**: a laser recipe whose result id the game does
 not know is a beam that fires into nothing, which no unit test and no package check
-would see. The ``crushing/`` files are the oldest carry and are covered by the in-game
+would see. ``recipe/mininglens/*.json`` (0.2.11) are checked the same way — the miner lens reads
+that table at runtime, and a result the game does not know makes the beam place nothing.
+The ``crushing/`` files are the oldest carry and are covered by the in-game
 legs instead (the crusher's own matcher, with ``rice`` the one their blocker records).
 
     python3 ports/actuallyadditions/tools/check_recipe_keys.py
@@ -48,6 +50,8 @@ from pathlib import Path
 
 PORT = Path(__file__).resolve().parents[1]
 MOD = "actuallyadditions"
+# The miner lens's custom recipe folder (`data/actuallyadditions/recipe/mininglens/*.json`).
+MINING_DIR = "mininglens"
 DEFAULT_RESOURCES = Path(
     os.environ.get(
         "HORIZON_RES",
@@ -252,6 +256,49 @@ def main() -> int:
             failures.append(
                 f"{recipe_id}: unresolved {', '.join(unresolved)}"
                 " (the beam would fire into nothing; declare the item/tag or add a blocker)"
+            )
+
+    # The miner lens's `actuallyadditions:mining_lens` table is read by the beam's own matcher at
+    # runtime (`LensMining.invoke` → `MiningLensRecipe`). Like the laser table it is not a vanilla
+    # shaped recipe, so no loader check covers it: an unresolved ingredient makes a recipe that can
+    # never match, and a result this world does not know makes the beam place nothing. The weight
+    # must be a non-negative integer or `WeightedRandom` cannot use the table at all.
+    mining_dir = args.port / "data" / MOD / "recipe" / MINING_DIR
+    mining = sorted(mining_dir.glob("*.json")) if mining_dir.is_dir() else []
+    for path in mining:
+        recipe = read_json(path)
+        recipe_id = f"{MOD}:{MINING_DIR}/{path.stem}"
+        extra_known.add(recipe_id)
+        unresolved = []
+        weight = recipe.get("weight")
+        if not isinstance(weight, int) or isinstance(weight, bool) or weight < 0:
+            failures.append(f"{recipe_id}: 'weight' must be a non-negative integer, got {weight!r}")
+        for kind, name in ingredients(recipe):
+            if kind == "tag":
+                members = expand_tag(name, tags, set())
+                if not members and not _vanilla_tag(args.resources, name):
+                    unresolved.append(f"#{name}")
+                elif not any(m in vanilla or m in own for m in members):
+                    unresolved.append(f"#{name}")
+            elif name not in vanilla and name not in own:
+                unresolved.append(name)
+        result = recipe.get("result") if isinstance(recipe.get("result"), dict) else {}
+        result_id = result.get("id")
+        if not isinstance(result_id, str):
+            unresolved.append("a result without an id")
+        elif result_id not in vanilla and result_id not in own:
+            unresolved.append(f"result {result_id}")
+        if not unresolved:
+            craftable.add(recipe_id)
+            print(f"ok       {recipe_id}: every ingredient and its result resolve (mining_lens)")
+            continue
+        symbol = blocked.get(recipe_id, {}).get("blocked")
+        if symbol:
+            print(f"blocked  {recipe_id}: {symbol} — {', '.join(unresolved)}")
+        else:
+            failures.append(
+                f"{recipe_id}: unresolved {', '.join(unresolved)}"
+                " (the beam would swap into nothing; declare the item/tag or add a blocker)"
             )
 
     for recipe_id, record in blocked.items():

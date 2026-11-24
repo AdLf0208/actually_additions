@@ -80,6 +80,11 @@
 #    `info` reads `lens actuallyadditions:lens x1`; a non-lens and a second lens are refused; and a
 #    dropped lens in the beam becomes `lens_of_color` for the 1,000 CF gate plus the 5,000 CF
 #    conversion, while a dropped non-lens stays and the shot spends only its gate;
+#  - (0.2.11) the miner lens's own beam effect: the harness-given miner lens (its craft needs
+#    crystals this package does not carry) fills the slot, and a 61,000 CF shot at a stone block
+#    (1,000 gate + the lens's 60,000) replaces it with one of the nine mining-lens ores, read back
+#    with `ctl block`, while a fresh machine with the default lens keeps its stone and spends only
+#    the 1,000 CF gate;
 #  - with CONTROL_GAME set, an unmodded game on the same scratch home knows neither id
 #    (`setblock` answers `Unknown block type`), so the ids are the package's.
 #
@@ -92,12 +97,13 @@
 # ("the beam converts no dropped item"), which the drop makes false, so it must fail; SELFTEST=pulse
 # flips the pulse phase's first assertion ("a rising edge fires nothing"), which the toggle makes
 # false, so it must fail; SELFTEST=lens flips the lens-slot assertion ("the slot stays empty"), which
-# the right-click makes false, so it must fail too. NEGATIVE=1 flips the crafting phase's recipe-book
+# the right-click makes false, so it must fail too; SELFTEST=lens-effect flips the miner assertion
+# ("the stone stays"), which the 60,000 CF ore swap makes false. NEGATIVE=1 flips the crafting phase's recipe-book
 # assertion ("the Coal Generator's recipe is not unlocked"), which is the pre-0.2.4 state, so it must
 # fail on this package.
 #
 #   GAME=<launcher-built horizon-client> [CTL=<horizon-ctl>] [CONTROL_GAME=<unmodded game>] \
-#       [SELFTEST=1|drops|ore|laser|item|pulse|lens] [NEGATIVE=1] tools/e2e.sh
+#       [SELFTEST=1|drops|ore|laser|item|pulse|lens|lens-effect] [NEGATIVE=1] tools/e2e.sh
 set -euo pipefail
 export LC_ALL=C
 
@@ -1825,6 +1831,96 @@ ctl command "clear @s" >/dev/null
 ctl command "kill @e[type=item]" >/dev/null
 ctl wait 4
 
+# ---------------------------------------------------------------------------
+# N: the miner lens's own beam effect (0.2.11)
+# ---------------------------------------------------------------------------
+echo "== the miner lens's own beam effect (0.2.11) =="
+# Upstream `LensMining.invoke` is not a plain break: with 60,000 CF it swaps the sighted
+# `stone_ore_replaceables` block for a weighted-random ore from `actuallyadditions:mining_lens`.
+# The miner lens item is **given by the harness**, not crafted: its own recipe keys on empowered
+# crystals this package does not carry. Nothing here dresses that give up as a craft.
+MINER_Z=52
+ctl command "fill -8 99 50 24 99 56 minecraft:stone" >/dev/null
+ctl command "fill -8 100 50 24 110 56 minecraft:air" >/dev/null
+MINER_X=0
+MINER_TARGET=$((MINER_X + 2))
+ctl command "setblock $MINER_X 100 $MINER_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $MINER_TARGET 100 $MINER_Z minecraft:stone" >/dev/null
+ctl command "give @s actuallyadditions:lens_of_the_miner 1" >/dev/null
+ctl wait 4
+echo "  the miner lens is harness-given (its craft needs crystals this package lacks): $(ctl inventory | jq -c '.held.item // empty')"
+click_with actuallyadditions:lens_of_the_miner "$MINER_X" 100 "$MINER_Z"
+line=$(info "$MINER_X" 100 "$MINER_Z")
+echo "  after the miner-lens click: $line"
+case "$line" in
+    *"lens actuallyadditions:lens_of_the_miner x1"*) ;;
+    *) fail "the miner lens did not fill the slot: $line" ;;
+esac
+
+# 61,000 CF = the 1,000 CF shot gate + the miner lens's own 60,000 CF (CommonConfig default).
+# The brief's 1,040 CF cannot fire this lens; the artefact's number is the one used here.
+ctl tp "$((MINER_X + 6)).5" 100 "$(centre "$MINER_Z")" >/dev/null
+charge "$MINER_X" 100 "$MINER_Z" 61000 >/dev/null
+# The 100-tick cycle is phase-derived from the machine's placement, so a fixed wait can sample
+# either side of a shot: poll until the world changes, then read it back. Both the poll and the
+# assertion use `ctl block`, never a command reply's wording.
+for _ in $(seq 1 60); do
+    ctl wait 4 >/dev/null
+    MINER_GOT=$(block_state_of "$MINER_TARGET" 100 "$MINER_Z")
+    case "$MINER_GOT" in
+        minecraft:stone*) ;;
+        *) break ;;
+    esac
+done
+line=$(info "$MINER_X" 100 "$MINER_Z")
+echo "  after the miner shot: $line"
+echo "  the sighted block after the miner shot: $MINER_GOT"
+if [ "$SELFTEST" = lens-effect ]; then
+    # The flipped assertion says the stone stays — true only on the old default-beam package.
+    case "$MINER_GOT" in
+        minecraft:stone*) fail "SELFTEST lens-effect: the stone was replaced (the real assertion); the flipped assertion 'the stone stays' fails, so the real one can fail" ;;
+    esac
+    fail "SELFTEST lens-effect: the flipped assertion passed (the stone stayed), so it proves nothing"
+fi
+case "$MINER_GOT" in
+    minecraft:stone*) fail "the miner lens left the sighted stone in place: $MINER_GOT" ;;
+esac
+case "$MINER_GOT" in
+    actuallyadditions:black_quartz_ore*|minecraft:coal_ore*|minecraft:copper_ore*|minecraft:diamond_ore*|minecraft:emerald_ore*|minecraft:gold_ore*|minecraft:iron_ore*|minecraft:lapis_ore*|minecraft:redstone_ore*) echo "  the stone became one of the nine stone-tag mining-lens ores" ;;
+    *) fail "the miner lens placed an unexpected block (not a mining-lens ore): $MINER_GOT" ;;
+esac
+[ "$(energy_of "$line")" = 0 ] || fail "61,000 CF did not pay the gate and the miner's 60,000 CF: $line"
+
+# The differential: the same block in front of a fresh reconstructor with the default lens. It
+# keeps its stone (no carried laser recipe converts stone) and spends only the 1,000 CF gate.
+DIFF_MINER_X=8
+DIFF_MINER_TARGET=$((DIFF_MINER_X + 2))
+ctl command "setblock $DIFF_MINER_X 100 $MINER_Z actuallyadditions:atomic_reconstructor[facing=east]" >/dev/null
+ctl command "setblock $DIFF_MINER_TARGET 100 $MINER_Z minecraft:stone" >/dev/null
+ctl tp "$((DIFF_MINER_X + 6)).5" 100 "$(centre "$MINER_Z")" >/dev/null
+charge "$DIFF_MINER_X" 100 "$MINER_Z" 61000 >/dev/null
+# The default lens cannot convert stone, so its block never changes: read the energy once after a
+# shot's worth of ticks and once more only if the first sample caught the cycle before its zero.
+ctl wait 60 >/dev/null
+DIFF_LINE=$(info "$DIFF_MINER_X" 100 "$MINER_Z")
+if [ "$(energy_of "$DIFF_LINE")" = 61000 ]; then
+    ctl wait 60 >/dev/null
+    DIFF_LINE=$(info "$DIFF_MINER_X" 100 "$MINER_Z")
+fi
+DIFF_GOT=$(block_state_of "$DIFF_MINER_TARGET" 100 "$MINER_Z")
+echo "  the plain lens's sighted block: $DIFF_GOT"
+case "$DIFF_GOT" in
+    minecraft:stone*) ;;
+    *) fail "the plain lens changed the stone: $DIFF_GOT" ;;
+esac
+echo "  the plain lens's shot: $DIFF_LINE"
+[ "$(energy_of "$DIFF_LINE")" = 60000 ] || fail "the plain lens spent more than the 1,000 CF gate: $DIFF_LINE"
+
+ctl command "clear @s" >/dev/null
+ctl command "kill @e[type=item]" >/dev/null
+ctl command "tp @s 0.5 100 3.5" >/dev/null
+ctl wait 6
+
 control
 
-echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), the reconstructor's redstone mode started off and a stick left it there while a click holding a redstone torch switched it to pulse mode without placing the torch, pulse mode neither ran its cycle nor fired without a signal, a redstone block beside the machine fired exactly one 1,040 CF shot on each of two rising edges (two crystals, a 2,080 CF buffer emptied, the cycle untouched) while the same machine without the toggle stayed frozen on the same signal and spent nothing, and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed; the lens (eight glass and a Black Quartz, all nine consumed) crafted and right-clicked into the reconstructor's empty slot (info read lens actuallyadditions:lens x1), a second lens was refused by the occupied slot and a stick was refused by the slot, and a dropped lens in the beam became lens_of_color for the 1,000 CF gate plus the 5,000 CF ring conversion (40 CF left) while a dropped stick stayed and spent only its gate"
+echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), the reconstructor's redstone mode started off and a stick left it there while a click holding a redstone torch switched it to pulse mode without placing the torch, pulse mode neither ran its cycle nor fired without a signal, a redstone block beside the machine fired exactly one 1,040 CF shot on each of two rising edges (two crystals, a 2,080 CF buffer emptied, the cycle untouched) while the same machine without the toggle stayed frozen on the same signal and spent nothing, and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed; the lens (eight glass and a Black Quartz, all nine consumed) crafted and right-clicked into the reconstructor's empty slot (info read lens actuallyadditions:lens x1), a second lens was refused by the occupied slot and a stick was refused by the slot, and a dropped lens in the beam became lens_of_color for the 1,000 CF gate plus the 5,000 CF ring conversion (40 CF left) while a dropped stick stayed and spent only its gate, and the harness-given miner lens in the slot made a 61,000 CF shot swap the sighted stone for one of the nine mining-lens ores (the block read back with ctl block) while a fresh default-lens machine kept its stone and spent only its gate"

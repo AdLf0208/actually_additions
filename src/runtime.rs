@@ -1082,11 +1082,12 @@ impl Reconstructor {
 /// `lens → lens_of_color → lens_of_detonation → lens_of_certain_death → lens`. The port carries
 /// all four; the three non-plain lenses' own beam effects are a later slice (their acceptance here
 /// is faithful to `getLens`, but the beam uses the default conversion rule for them).
-pub const LENS_ITEMS: [&str; 4] = [
+pub const LENS_ITEMS: [&str; 5] = [
     "actuallyadditions:lens",
     "actuallyadditions:lens_of_color",
     "actuallyadditions:lens_of_detonation",
     "actuallyadditions:lens_of_certain_death",
+    LENS_OF_THE_MINER,
 ];
 
 /// Whether `item` is one of the mod's lens items (`instanceof ILensItem` upstream).
@@ -1101,6 +1102,48 @@ pub fn is_lens(item: &str) -> bool {
 #[must_use]
 pub fn lens_slot_accepts(slot: Option<&str>, item: &str) -> bool {
     slot.is_none() && is_lens(item)
+}
+
+/// Upstream `CommonConfig.Machines.MINER_LENS_ENERGY`: the CF the miner lens spends per block it
+/// swaps (`CommonConfig.java:56`, default 60,000, on top of the shot's 1,000 CF gate).
+pub const MINING_LENS_ENERGY: i32 = 60_000;
+
+/// `LensMining.getDistance` — the same ten blocks as the default conversion lens.
+pub const MINING_LENS_DISTANCE: i32 = 10;
+
+/// The behaviour lens whose `ItemLens.getLens()` is upstream's `LensMining` (`LensMining.java`).
+/// Its crafting recipe names empowered crystals this package does not carry, so the in-game rig
+/// gives the item; the item itself is in the jar and is an `ILensItem`, so the slot accepts it.
+pub const LENS_OF_THE_MINER: &str = "actuallyadditions:lens_of_the_miner";
+
+/// Which `Lens.invoke` a held lens item selects (`TileEntityAtomicReconstructor.getLens` →
+/// `MethodHandler.invokeReconstructor`). Only the miner's own rule is carried in this slice; the
+/// three other behaviour lenses are distinct `invoke` paths and are recorded as gaps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LensEffect {
+    /// `LensConversion`: the default conversion of the plane and the beam's dropped items.
+    Conversion,
+    /// `LensMining`: replace the sighted ore-replaceable block with a weighted-random ore.
+    Mining,
+}
+
+impl LensEffect {
+    /// The rule a held lens item selects; an empty slot (no id) is upstream's `lensDefaultConversion`.
+    pub fn of(item: &str) -> Self {
+        if item == LENS_OF_THE_MINER {
+            Self::Mining
+        } else {
+            Self::Conversion
+        }
+    }
+
+    /// Upstream `Lens.getDistance`: both the default conversion lens and the miner reach ten blocks.
+    pub fn distance(self) -> i32 {
+        match self {
+            Self::Conversion => RECONSTRUCTOR_LENS_DISTANCE,
+            Self::Mining => MINING_LENS_DISTANCE,
+        }
+    }
 }
 
 /// What a placed reconstructor comes back with: its buffer clamped and its cycle inside the
@@ -1271,6 +1314,94 @@ impl LaserRecipe {
             .unwrap_or(1)
             .clamp(1, 99) as i32
     }
+}
+
+/// Why an `actuallyadditions:mining_lens` recipe file was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MiningLensError {
+    MissingIngredient,
+    MissingResult,
+    BadWeight,
+}
+
+impl std::fmt::Display for MiningLensError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            MiningLensError::MissingIngredient => "missing ingredient",
+            MiningLensError::MissingResult => "missing result",
+            MiningLensError::BadWeight => "a weight that is not a non-negative integer",
+        };
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for MiningLensError {}
+
+/// One `actuallyadditions:mining_lens` recipe (upstream `MiningLensRecipe`): the ingredient the
+/// sighted block's item must match, the block result placed over it, and its random-selection weight.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MiningLensRecipe {
+    pub id: String,
+    pub ingredient: Json,
+    pub result: Json,
+    pub weight: u32,
+}
+
+impl MiningLensRecipe {
+    /// Parse a recipe file. The custom table keeps 1.21.1's JSON as written.
+    pub fn parse(id: &str, json: &str) -> Result<Self, MiningLensError> {
+        let value = Json::parse(json).ok_or(MiningLensError::MissingIngredient)?;
+        let ingredient = value
+            .get("ingredient")
+            .ok_or(MiningLensError::MissingIngredient)?;
+        if !matches!(
+            ingredient,
+            Json::Object(_) | Json::Array(_) | Json::String(_)
+        ) {
+            return Err(MiningLensError::MissingIngredient);
+        }
+        let result = value.get("result").ok_or(MiningLensError::MissingResult)?;
+        if result.get("id").and_then(Json::as_str).is_none() {
+            return Err(MiningLensError::MissingResult);
+        }
+        let weight = value
+            .get("weight")
+            .and_then(Json::as_i64)
+            .ok_or(MiningLensError::BadWeight)?;
+        if !(0..=i64::from(u32::MAX)).contains(&weight) {
+            return Err(MiningLensError::BadWeight);
+        }
+        Ok(Self {
+            id: id.to_owned(),
+            ingredient: ingredient_json(ingredient),
+            result: result.clone(),
+            weight: weight as u32,
+        })
+    }
+
+    /// The item id the recipe places.
+    pub fn result_id(&self) -> Option<&str> {
+        self.result.get("id").and_then(Json::as_str)
+    }
+}
+
+/// Upstream `WeightedRandom.getRandomItem`: `random.nextInt(totalWeight)` walks the matching recipes
+/// in order, each owning a slice of the total. The pure rule takes the drawn `roll` so it is testable.
+#[must_use]
+pub fn pick_weighted(recipes: &[MiningLensRecipe], roll: i32) -> Option<&MiningLensRecipe> {
+    let total: i64 = recipes.iter().map(|recipe| i64::from(recipe.weight)).sum();
+    if total <= 0 || roll < 0 || i64::from(roll) >= total {
+        return None;
+    }
+    let mut remaining = i64::from(roll);
+    recipes.iter().find(|recipe| {
+        if remaining < i64::from(recipe.weight) {
+            true
+        } else {
+            remaining -= i64::from(recipe.weight);
+            false
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1804,6 +1935,124 @@ mod reconstructor_tests {
         assert!(
             !lens_slot_accepts(None, "minecraft:stick"),
             "a non-lens is refused by the empty slot"
+        );
+    }
+
+    #[test]
+    fn a_miner_lens_is_accepted_by_the_slot_and_selects_the_mining_effect() {
+        assert!(
+            lens_slot_accepts(None, LENS_OF_THE_MINER),
+            "the miner lens is an ILensItem, so the empty slot accepts it"
+        );
+        assert_eq!(
+            LensEffect::of(LENS_OF_THE_MINER),
+            LensEffect::Mining,
+            "its getLens() is LensMining"
+        );
+        assert_eq!(
+            LensEffect::of("actuallyadditions:lens"),
+            LensEffect::Conversion,
+            "the plain lens keeps the default conversion"
+        );
+        assert_eq!(
+            LensEffect::of(""),
+            LensEffect::Conversion,
+            "an empty slot is the default conversion lens"
+        );
+    }
+
+    #[test]
+    fn the_mining_lens_costs_sixty_thousand_cf_and_reaches_ten_blocks() {
+        assert_eq!(
+            MINING_LENS_ENERGY, 60_000,
+            "CommonConfig's minerLensEnergy default"
+        );
+        assert_eq!(LensEffect::Mining.distance(), 10, "LensMining.getDistance");
+        let mut state = Reconstructor {
+            energy: 61_000,
+            ..Reconstructor::new()
+        };
+        assert_eq!(
+            state.fire(),
+            Some(60_000),
+            "the 1,000 CF gate is paid first"
+        );
+        assert!(
+            state.can_afford(MINING_LENS_ENERGY),
+            "the gate leaves the miner's 60,000"
+        );
+        state.spend(MINING_LENS_ENERGY);
+        assert_eq!(state.energy, 0, "the miner's own energy is charged on top");
+        let mut short = Reconstructor {
+            energy: 1_040,
+            ..Reconstructor::new()
+        };
+        assert_eq!(short.fire(), Some(40));
+        assert!(
+            !short.can_afford(MINING_LENS_ENERGY),
+            "a 1,040 CF shot cannot fire the miner lens"
+        );
+    }
+
+    #[test]
+    fn a_weighted_pick_walks_the_recipes_in_order_with_the_roll() {
+        let recipes = [
+            MiningLensRecipe {
+                id: "a".into(),
+                ingredient: Json::Null,
+                result: Json::Null,
+                weight: 2,
+            },
+            MiningLensRecipe {
+                id: "b".into(),
+                ingredient: Json::Null,
+                result: Json::Null,
+                weight: 3,
+            },
+            MiningLensRecipe {
+                id: "c".into(),
+                ingredient: Json::Null,
+                result: Json::Null,
+                weight: 5,
+            },
+        ];
+        let picked = |roll| pick_weighted(&recipes, roll).map(|recipe| recipe.id.as_str());
+        assert_eq!(picked(0), Some("a"));
+        assert_eq!(picked(1), Some("a"), "a owns rolls 0 and 1");
+        assert_eq!(picked(2), Some("b"), "b owns rolls 2, 3 and 4");
+        assert_eq!(picked(4), Some("b"));
+        assert_eq!(picked(5), Some("c"), "c owns rolls 5 through 9");
+        assert_eq!(picked(9), Some("c"));
+        assert_eq!(picked(10), None, "a roll past the total picks nothing");
+        assert_eq!(
+            pick_weighted(&[], 0),
+            None,
+            "no matching recipe picks nothing"
+        );
+    }
+
+    #[test]
+    fn a_mining_lens_recipe_is_read_from_the_jars_json() {
+        let recipe = MiningLensRecipe::parse(
+            "actuallyadditions:mining_lens/stone_coal_ore",
+            r#"{"type":"actuallyadditions:mining_lens","ingredient":{"tag":"actuallyadditions:stone_ore_replaceables"},"result":{"count":1,"id":"minecraft:coal_ore"},"weight":5000}"#,
+        )
+        .expect("the jar's own recipe parses");
+        assert_eq!(recipe.id, "actuallyadditions:mining_lens/stone_coal_ore");
+        assert_eq!(recipe.weight, 5000);
+        assert_eq!(recipe.result_id(), Some("minecraft:coal_ore"));
+        assert_eq!(
+            recipe.ingredient.to_string(),
+            "\"#actuallyadditions:stone_ore_replaceables\"",
+            "the tag ingredient is normalised to the pin's #tag form"
+        );
+        assert!(
+            MiningLensRecipe::parse(
+                "x:y",
+                r#"{"ingredient":{"item":"a:b"},"result":{"id":"c:d"}}"#
+            )
+            .is_err(),
+            "a recipe with no weight is refused"
         );
     }
 }

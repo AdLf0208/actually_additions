@@ -2539,3 +2539,180 @@ strips enchantments from items.
   block with the plain lens in the slot.
 - **Out of scope:** the GUI (`blocked(no-single-player-mod-screen)`), the Double Crusher, the ore's
   generation (`blocked(configured-feature-not-registered)`), the beam's visual.
+
+## Slice 10 (0.2.11, 2026-11-24) — the miner lens's own beam effect
+
+**Family:** the first of the behaviour lenses' own effects: `LensMining.invoke`, which swaps the
+block the beam sights for a weighted-random ore from the jar's `actuallyadditions:mining_lens`
+recipe table, paying the lens's own 60,000 CF on top of the shot's 1,000 CF gate. The three other
+behaviour lenses are distinct `invoke` rule paths and stay out of scope here (see gaps).
+
+- **Gap line** (0.2.10's deviations, item 1 at `notes.md:2491`): *"The three non-plain ring items
+  are accepted but use the default beam rule … their own effects are the next family."*
+- **Why it fits `machines`:** a branch in the beam the port already ships, driven by the lens id in
+  the slot it now accepts — no new block, renderer or hook kind. The data (20 recipes, three tags,
+  one item) is a carry; the rule is pure `runtime.rs` plus one glue step.
+- **Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
+  `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
+
+### The lens rules as read (`cd9d9c6`, not invented)
+
+| Rule | Value | Source |
+|---|---|---|
+| the dispatch | `invokeReconstructor` pays the 1,000 CF gate, then calls the installed lens's own `invoke`; only `LensConversion` calls `invokeConversionLens` (the port's plane + item halves) | `MethodHandler.java:281-304` |
+| the miner's action | a **recipe-driven block swap**, not a plain break: for a non-air sighted block whose item matches an `actuallyadditions:mining_lens` recipe, pick a weighted random recipe and place its `BlockItem` result's default state at `hitPos` | `LensMining.java:31-67` |
+| the miner's energy | `CommonConfig.Machines.MINER_LENS_ENERGY` = **60,000 CF**, spent only when a result is placed | `CommonConfig.java:56` |
+| reach and stop | `getDistance = 10`; air returns false (the beam continues), any non-air block returns true (the beam stops), even when nothing matched or the buffer could not pay | `LensMining.java:70-76`, `:44-65` |
+| the recipe table | 20 top-level `recipe/mininglens/*.json`: 9 keyed on `actuallyadditions:stone_ore_replaceables` (stone, granite, diorite, andesite), 8 on `deepslate_ore_replaceables`, 3 on the NeoForge `c:ore_bearing_ground/netherrack`; weights 30…5,000 | jar + `MiningLensGenerator.java` |
+| the weighted pick | `WeightedRandom.getRandomItem` uses `random.nextInt(totalWeight)` and walks the matching recipes in order | `LensMining.java:53-60` |
+
+**The brief's energy number is wrong and the artefact wins.** It asked for a **1,040 CF** shot;
+the miner lens spends **60,000 CF**, so a shot needs 1,000 + 60,000 = **61,000 CF**. The in-game
+rig charges 61,000 CF and the log says so. A 1,040 CF shot is unit-tested as *unable* to fire the
+miner (`the_mining_lens_costs_sixty_thousand_cf_and_reaches_ten_blocks`).
+
+### What is carried
+
+`actuallyadditions:lens_of_the_miner` (the jar's item model, texture and a `horizon/item`
+declaration with `max_stack_size: 1`), the 20 top-level `mining_lens` recipe files (the carry's
+subfolders name other mods' ores and are **not** carried), the two `actuallyadditions:*_ore_replaceables`
+item tags and the `c:ore_bearing_ground/netherrack` convention tag (`minecraft:netherrack`).
+`check_recipe_keys.py` now checks the new custom table's ingredients, weights and results:
+`7 recipe(s), 36 craftable, 0 blocked, 0 failure(s)`.
+
+**The miner lens is given by the harness, not crafted.** Its own crafting recipe names empowered
+crystals this package does not carry. The e2e prints that fact and asserts the give; no command
+give is dressed up as a craft. `lens_slot_accepts` accepts it because it is an `ILensItem` in the
+jar, which is faithful to `getLens`.
+
+### TDD — the red, verbatim
+
+Four rules were written first with `todo!()` bodies (`evidence/actuallyadditions/sdk-test-red-lens-effect.log`,
+`cargo test --offline`, exit 101):
+
+```text
+---- runtime::reconstructor_tests::a_miner_lens_is_accepted_by_the_slot_and_selects_the_mining_effect stdout ----
+thread '…' panicked at src/runtime.rs:1894:9:
+the miner lens is an ILensItem, so the empty slot accepts it
+
+---- runtime::reconstructor_tests::a_mining_lens_recipe_is_read_from_the_jars_json stdout ----
+thread '…' panicked at src/runtime.rs:1342:9:
+not yet implemented: parse the jar's mining_lens recipe JSON
+
+---- runtime::reconstructor_tests::a_weighted_pick_walks_the_recipes_in_order_with_the_roll stdout ----
+thread '…' panicked at src/runtime.rs:1355:5:
+not yet implemented: pick the recipe whose weight slice contains the roll
+
+---- runtime::reconstructor_tests::the_mining_lens_costs_sixty_thousand_cf_and_reaches_ten_blocks stdout ----
+thread '…' panicked at src/runtime.rs:1134:9:
+not yet implemented: the lens's own beam distance
+
+test result: FAILED. 60 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Green: **64 passed**, 0 failed (45 `runtime::` incl. 4 json and the miner rules, 19 `support::`).
+
+### The glue trap found in game (and fixed here)
+
+The first in-game run fired the lens's gate three times (61,000 → 58,000 CF) and never swapped the
+stone. The cause is a **platform seam, not upstream**: during a block entity's own tick it is out of
+the world's map, so re-reading the lens in `fire_beam` via `host.block_entity(level, pos)` answered
+`None` and every installed lens silently read as the default conversion. The tick's own
+`event.entity.items[0]` is the authoritative slot; `ReconstructorPart::block_entity_tick` now reads
+the lens id there and passes it through `tick_reconstructor` → `fire_beam`. The `/info` line always
+read the persistent slot, which is why it reported `lens actuallyadditions:lens_of_the_miner x1`
+while the beam was using the default rule. The e2e's "stone became an ore" assertion caught it.
+
+### Ladder (0.2.11, slot `G10-actuallyadditions`, `CARGO_INCREMENTAL=0`, no `BUILD_LOCAL=1`)
+
+Every cargo step was forwarded (`build-slot: forwarding … to the remote runner`, `REMOTE_HOST=AdLf-PC`).
+
+| Step | Result |
+|---|---|
+| tests (red first) | 60 passed / 4 failed, the new rules at `todo!()` — `sdk-test-red-lens-effect.log` |
+| tests | **64 passed**, 0 failed, `Compiling actuallyadditions v0.2.11` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings`, exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check`, exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` — `7 recipe(s), 36 craftable, 0 blocked, 0 failure(s)` — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice — **174,980 B** both, `cmp` identical, sha256 `b360583de142d0bea5e0036396e4d9149efb9977b0216f1c95d1039c3a069838`, **201 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `actuallyadditions 0.2.11 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 174,980 bytes, EXIT 0 — `check-run-0.2.11.log` |
+| fits, the pin | `Actually Additions:` / `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` → **1/1**, `package matches the tree`, R9 rows green — `verify-gate-0.2.11.log` |
+| launcher build | stale `native-0a875da-e321921d7f83` removed, `native-0a875da-f6e610072fc5`, `Compiling actuallyadditions (1 of 1)` — `launcher-build-0.2.11.log` |
+
+The dependency-free `Json` reader from 0.2.9 is unchanged (the miner parser uses its `get`/`as_i64`),
+so R9 still passes (`SDK-only dependencies`, `no packed Cargo.lock`). No local type collided with the
+SDK surface, so both `fits` runs were green on the first attempt.
+
+### In-game transcript (`evidence/actuallyadditions-e2e/e2e-launcher.log`, 0.2.11)
+
+```text
+== the miner lens's own beam effect (0.2.11) ==
+  the miner lens is harness-given (its craft needs crystals this package lacks): "actuallyadditions:lens_of_the_miner"
+  after the miner-lens click: Atomic Reconstructor at 0,100,52: 0/300000 CF (…, lens actuallyadditions:lens_of_the_miner x1, sight minecraft:stone -> mining actuallyadditions:black_quartz_ore @ 60000 CF, t=…)
+  after the miner shot: Atomic Reconstructor at 0,100,52: 0/300000 CF (…, sight minecraft:iron_ore -> nothing, t=…)
+  the sighted block after the miner shot: minecraft:iron_ore
+  the stone became one of the nine stone-tag mining-lens ores
+  the plain lens's sighted block: minecraft:stone
+  the plain lens's shot: Atomic Reconstructor at 8,100,52: 60000/300000 CF (…, lens default, sight minecraft:stone -> nothing, t=…)
+```
+
+Every assertion can fail and was made to: `SELFTEST=lens-effect` flips the break assertion to "the
+stone stays", which is false on this package — `FAIL: SELFTEST lens-effect: the stone was replaced
+(the real assertion); the flipped assertion 'the stone stays' fails, so the real one can fail` +
+`EXIT:1` (`e2e-launcher-selftest-lens-effect.log`). The differential machine with the plain lens
+keeps its stone and spends exactly the 1,000 CF gate (60,000 CF left). The 10 earlier legs are
+unchanged and re-proved in the same run; `check-e2e-logs.py actuallyadditions-e2e --strict` →
+`logs=11 ok=11 missing-exit=0 bad-exit=0`.
+
+### Coverage (slice 10)
+
+| Family | State |
+|---|---|
+| `LensMining`'s block swap | **tested** — a harness-given miner lens in the slot makes a 61,000 CF shot replace `minecraft:stone` with one of the nine stone-tag ores, read back with `ctl block`; 61,000 CF → 0 |
+| the miner's 60,000 CF price | **tested** — a 1,040 CF shot cannot fire it (unit test), and the differential's plain lens spends only the 1,000 CF gate |
+| the installed-lens dispatch in the tick | **tested** — the first run fired gates with the default rule and failed the ore assertion; fixed by passing `event.entity.items[0]` into the beam |
+| the 20 `mining_lens` recipes and three tags | **tested through their consumer + the content rule** — the sight names a matching recipe, `check_recipe_keys.py` resolves every ingredient, weight and result; the weighted draw is unit-tested deterministically |
+| the miner lens's own craft | **not carried** — it keys on empowered crystals this package does not have; the in-game rig gives the item and says so |
+| the killer, detonator and disenchanting lens effects | **not ported (next slice; distinct rule paths)** — damage (`EntityRef::hurt`), explosion (`LevelRef::explode`) and item-enchantment edits (`ItemEnchantments`) are separate `Lens.invoke` implementations with their own energies and boxes; their surfaces were read from the pin's `surface.json`, none was guessed here |
+| the GUI, ore generation, comparator, beam visual | unchanged: `blocked(no-single-player-mod-screen)`, `blocked(configured-feature-not-registered)`, printed-not-wired, no packet (`levelEvent(2001)` for the swap is still absent) |
+
+### Upstream defects fixed
+
+None found in this slice: the recipe table, the weights, the 60,000 CF price, the stop-on-non-air
+rule and the item's `ILensItem` status all match the artefact. The tick-snapshot seam is a pin quirk
+recorded above, not an upstream defect.
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+**Changelog (0.2.11):**
+
+> **0.2.11 — the miner lens changes the beam.** The jar's `actuallyadditions:mining_lens` table (20
+> vanilla-ore recipes), its two `*_ore_replaceables` tags, the `c:ore_bearing_ground/netherrack`
+> convention tag and the `lens_of_the_miner` item ship. With that lens installed, the 1,000 CF
+> shot's beam swaps the block it sights for a weighted-random ore and pays the lens's own 60,000
+> CF, while the plain lens keeps the default conversion; the brief's 1,040 CF cannot fire it. The
+> lens is harness-given because its craft needs crystals this package lacks. The tick now reads the
+> lens from its own block-entity snapshot (a block entity is out of the world during its tick).
+> 64 unit tests, 11 in-game legs, 201 entries, 174,980 B, sha256 `b360583d…069838`.
+
+## Next slice (0.2.12)
+
+**Family:** the next **behaviour lens with a fail-capable in-game assertion and a shared rule path**.
+The detonator lens is the cheapest of the three remaining: `LensDetonation.invoke` explodes at the
+hit block for 250,000 CF with radius 10 and `ExplosionInteraction.NONE` (`LensDetonation.java:33-38`),
+and the pin's `LevelRef::explode(host, source, centre, radius, fire, interaction, settings)` is a
+measured surface. It does **not** share the miner's recipe/weighted rule path, so it is its own `invoke`
+branch selected by the new `LensEffect` enum's next variant; carry its item the same way (give in
+game, record that its craft is unreachable).
+
+- **Gap line** (this slice's coverage table): *"the killer, detonator and disenchanting lens effects
+  — not ported (next slice; distinct rule paths) — damage (`EntityRef::hurt`), explosion
+  (`LevelRef::explode`) and item-enchantment edits (`ItemEnchantments`) …"*.
+- **In-game assertion that can fail:** install the detonator lens, charge 251,000 CF (1,000 gate +
+  250,000), aim at a stone block, tick one shot, and assert with `ctl block` that the stone is gone
+  and a blast-shaped crater exists around it; the differential is a fresh default-lens machine at
+  the same block with the same charge, whose stone stays and whose buffer keeps 250,000 CF.
+- **Out of scope:** the miner (shipped), the GUI (`blocked(no-single-player-mod-screen)`), the ore's
+  generation (`blocked(configured-feature-not-registered)`), the beam's visual.

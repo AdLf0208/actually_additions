@@ -23,11 +23,12 @@ use mod_api::{
 use crate::runtime::{
     CONVERTED_MARKER, CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, Conversion, CrushResult,
     Crusher, CrushingRecipe, GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, LaserRecipe,
-    RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_LENS_DISTANCE, RECONSTRUCTOR_MAX_INSERT,
-    RECONSTRUCTOR_TICKS, Reconstructor, Signal, Step, bonus_for, can_crush, clamp_energy,
-    comparator_strength, conversion_plane, convert, facing_for_placement, is_fuel, is_lens,
-    item_scan_box, items_possible, lens_slot_accepts, may_convert, reconstructor_comparator,
-    restored_crusher, restored_generator, restored_reconstructor,
+    LensEffect, MINING_LENS_ENERGY, MiningLensRecipe, RECONSTRUCTOR_CAPACITY,
+    RECONSTRUCTOR_LENS_DISTANCE, RECONSTRUCTOR_MAX_INSERT, RECONSTRUCTOR_TICKS, Reconstructor,
+    Signal, Step, bonus_for, can_crush, clamp_energy, comparator_strength, conversion_plane,
+    convert, facing_for_placement, is_fuel, is_lens, item_scan_box, items_possible,
+    lens_slot_accepts, may_convert, pick_weighted, reconstructor_comparator, restored_crusher,
+    restored_generator, restored_reconstructor,
 };
 
 /// The generator block; its block entity type carries the same path.
@@ -40,6 +41,8 @@ pub(crate) const RECONSTRUCTOR: &str = "actuallyadditions:atomic_reconstructor";
 const CRUSHING: &str = "actuallyadditions:crushing";
 /// The custom recipe type the reconstructor's beam reads (upstream `LaserRecipe.NAME`).
 const LASER: &str = "actuallyadditions:laser";
+/// The miner lens's recipe type (`MiningLensRecipe.NAME`), read by `LensMining.invoke`.
+const MINING_LENS: &str = "actuallyadditions:mining_lens";
 /// Rebuild the parsed recipe cache this often (ticks): a `/reload` lands within two seconds and
 /// the pure parser cost is paid once, as the retired bundle did.
 const RECIPE_CACHE_TICKS: u64 = 40;
@@ -80,6 +83,9 @@ pub(crate) fn declare(r: &mut dyn Registrar, context: &RegistrationContext) {
     // the beam's own matcher.
     r.register_recipe_type(LASER);
     r.register_raw_recipe_serializer(LASER, LASER);
+    // The miner lens reads `actuallyadditions:mining_lens` through the same custom table.
+    r.register_recipe_type(MINING_LENS);
+    r.register_raw_recipe_serializer(MINING_LENS, MINING_LENS);
     // The type is declared first, then every per-block capability, then the Part: that is the
     // order the pin's own registrar expects (the block's declaration is what a container or a
     // buffer hangs off).
@@ -461,6 +467,9 @@ pub(crate) fn reset_recipes() {
     *RECIPES.lock().expect("the recipe cache lock is held") = None;
     RECIPE_TICKS.store(0, Ordering::Relaxed);
     *LASER_RECIPES.lock().expect("the laser cache lock is held") = None;
+    *MINING_RECIPES
+        .lock()
+        .expect("the mining cache lock is held") = None;
 }
 
 /// A laser recipe with its engine-resolved ingredient.
@@ -505,6 +514,52 @@ pub(crate) fn find_laser_recipe(host: &dyn Host, input: &ItemStack) -> Option<La
         .iter()
         .find(|resolved| resolved.ingredient.test(host, input))
         .map(|resolved| resolved.recipe.clone())
+}
+
+/// The miner lens's recipe table, rebuilt on the same cadence as the laser one. Unlike the laser
+/// recipes (first match wins), every matching recipe is kept: upstream collects them all and draws
+/// a weighted random one (`WeightedRandom.getRandomItem`).
+struct ResolvedMining {
+    ingredient: Ingredient,
+    recipe: MiningLensRecipe,
+}
+
+static MINING_RECIPES: Mutex<Option<Vec<ResolvedMining>>> = Mutex::new(None);
+
+/// Every `actuallyadditions:mining_lens` recipe whose ingredient matches `input`.
+fn find_mining_recipes(host: &dyn Host, input: &ItemStack) -> Vec<MiningLensRecipe> {
+    let due = RECIPE_TICKS
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(RECIPE_CACHE_TICKS);
+    let mut cache = MINING_RECIPES
+        .lock()
+        .expect("the mining cache lock is held");
+    if cache.is_none() || due {
+        let mut resolved = Vec::new();
+        for recipe in host.recipes_of_type(MINING_LENS).iter() {
+            let text = recipe.json.to_string();
+            let Ok(parsed) = MiningLensRecipe::parse(&recipe.id, &text) else {
+                continue;
+            };
+            let ingredient = host
+                .recipe_ingredient(&parsed.ingredient.to_string())
+                .ok()
+                .flatten();
+            if let Some(ingredient) = ingredient {
+                resolved.push(ResolvedMining {
+                    ingredient,
+                    recipe: parsed,
+                });
+            }
+        }
+        *cache = Some(resolved);
+    }
+    let recipes = cache.as_ref().expect("the mining cache was just filled");
+    recipes
+        .iter()
+        .filter(|resolved| resolved.ingredient.test(host, input))
+        .map(|resolved| resolved.recipe.clone())
+        .collect()
 }
 
 /// The item id a stack holds.
@@ -709,6 +764,7 @@ pub(crate) fn tick_reconstructor(
     level: Option<LevelRef>,
     pos: [i32; 3],
     saved: &mut Tag,
+    lens: Option<&str>,
 ) -> bool {
     let before = read_reconstructor(saved);
     let mut state = before.clone();
@@ -716,7 +772,7 @@ pub(crate) fn tick_reconstructor(
     if state.tick(signal)
         && let Some(level) = level
     {
-        fire_beam(host, level, pos, &mut state);
+        fire_beam(host, level, pos, &mut state, lens);
     }
     let changed = state != before;
     write_reconstructor(saved, &state);
@@ -726,26 +782,144 @@ pub(crate) fn tick_reconstructor(
 /// `MethodHandler.invokeReconstructor`: pay the shot's 1000 CF, then walk the beam outward,
 /// converting the 3x3 plane around each block it meets. The beam stops at the first block that
 /// is not air, or after [`RECONSTRUCTOR_LENS_DISTANCE`] blocks.
-fn fire_beam(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], state: &mut Reconstructor) {
+fn fire_beam(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    state: &mut Reconstructor,
+    lens: Option<&str>,
+) {
     let Some(facing) = facing_at(&*host, level, pos) else {
         return;
     };
+    // `invokeReconstructor` asks the installed lens for its own `invoke` and `getDistance`. The
+    // default conversion lens runs the plane + item halves; `LensMining` swaps the one block it
+    // sights. An empty slot is upstream's `lensDefaultConversion`.
+    //
+    // The lens id is handed in from the tick's own block-entity snapshot: during its tick a block
+    // entity is out of the world's map, so `host.block_entity(level, pos)` would answer none here
+    // and every installed lens would silently read as the default one.
+    let effect = LensEffect::of(lens.unwrap_or(""));
     if state.fire().is_none() {
         return;
     }
     let step = facing.offset();
-    for distance in 1..=RECONSTRUCTOR_LENS_DISTANCE {
+    for distance in 1..=effect.distance() {
         let hit = [
             pos[0] + step[0] * distance,
             pos[1] + step[1] * distance,
             pos[2] + step[2] * distance,
         ];
-        convert_plane(host, level, hit, facing, state);
-        convert_items(host, level, pos, hit, facing, state);
-        let solid = block_id(&*host, level, hit).is_some_and(|id| !is_air(&id));
-        if solid || distance == RECONSTRUCTOR_LENS_DISTANCE {
+        let solid = match effect {
+            LensEffect::Conversion => {
+                convert_plane(host, level, hit, facing, state);
+                convert_items(host, level, pos, hit, facing, state);
+                block_id(&*host, level, hit).is_some_and(|id| !is_air(&id))
+            }
+            LensEffect::Mining => mining_step(host, level, hit, state),
+        };
+        if solid || distance == effect.distance() {
             break;
         }
+    }
+}
+
+/// `LensMining.invoke` at one beam step: the sighted block (not the 3x3 plane) is swapped for a
+/// weighted-random ore from `actuallyadditions:mining_lens`. Air lets the beam continue; any
+/// non-air block stops it, exactly upstream's `return true`, even when the buffer cannot pay or no
+/// recipe matches. The 60,000 CF is charged only when a result block was actually placed.
+fn mining_step(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    hit: [i32; 3],
+    state: &mut Reconstructor,
+) -> bool {
+    let Some(id) = block_id(&*host, level, hit) else {
+        return false;
+    };
+    if is_air(&id) {
+        return false;
+    }
+    if !state.can_afford(MINING_LENS_ENERGY) {
+        return true;
+    }
+    let Some(stack) = block_item_stack(&*host, level, hit) else {
+        return true;
+    };
+    let recipes = find_mining_recipes(&*host, &stack);
+    let total = recipes
+        .iter()
+        .fold(0_i64, |sum, recipe| sum + i64::from(recipe.weight));
+    if total <= 0 || total > i64::from(i32::MAX) {
+        return true;
+    }
+    // `WeightedRandom.getRandomItem` uses `random.nextInt(totalWeight)` from the level's own
+    // stream, so a `/reload`-changed table is read before the draw.
+    let Some(roll) = level.with_random(&mut *host, |random| {
+        random.next_int_bound(total as i32).ok()
+    }) else {
+        return true;
+    };
+    let Some(roll) = roll else {
+        return true;
+    };
+    let Some(recipe) = pick_weighted(&recipes, roll) else {
+        return true;
+    };
+    let Some(key) = recipe.result_id().and_then(|id| item_key(&*host, id)) else {
+        return true;
+    };
+    let Some(block) = host.item_block(key) else {
+        return true;
+    };
+    let Some(placed) = host.block_state_default(block) else {
+        return true;
+    };
+    let original = level.block_state(&*host, hit);
+    let mut conversion = MiningConversion {
+        host,
+        level,
+        at: hit,
+        original,
+        placed,
+    };
+    let _ = convert(&mut conversion, MINING_LENS_ENERGY, state);
+    true
+}
+
+/// The miner's single block write: the result's default state goes over the source in one write,
+/// as upstream's `BlockItem` branch does (its `levelEvent(2001)` is the beam visual, still absent).
+struct MiningConversion<'a> {
+    host: &'a mut dyn ServerHost,
+    level: LevelRef,
+    at: [i32; 3],
+    original: Option<BlockState>,
+    placed: BlockState,
+}
+
+impl Conversion for MiningConversion<'_> {
+    fn remove_source(&mut self) -> bool {
+        self.level
+            .set_block(
+                &mut *self.host,
+                self.at,
+                self.placed,
+                BlockUpdateFlags::CLIENTS,
+            )
+            .unwrap_or(false)
+    }
+
+    fn emit_result(&mut self) -> bool {
+        true // remove_source wrote the result over the source
+    }
+
+    fn restore_source(&mut self) {
+        let Some(state) = self.original else {
+            return;
+        };
+        let _ = self
+            .level
+            .set_block(&mut *self.host, self.at, state, BlockUpdateFlags::CLIENTS);
     }
 }
 
@@ -1575,6 +1749,7 @@ fn reconstructor_sight(
     level: LevelRef,
     pos: [i32; 3],
     facing: Option<crate::runtime::Facing>,
+    lens: Option<&str>,
 ) -> String {
     let Some(facing) = facing else {
         return "unknown".to_owned();
@@ -1592,15 +1767,26 @@ fn reconstructor_sight(
         if is_air(&block) {
             continue;
         }
-        return match block_item_stack(host, level, at)
-            .and_then(|stack| find_laser_recipe(host, &stack))
-        {
-            Some(recipe) => format!(
-                "{block} -> {} @ {} CF",
-                recipe.result_id().unwrap_or("nothing"),
-                recipe.energy
-            ),
-            None => format!("{block} -> nothing"),
+        let stack = block_item_stack(host, level, at);
+        return match LensEffect::of(lens.unwrap_or("")) {
+            LensEffect::Conversion => match stack.and_then(|stack| find_laser_recipe(host, &stack))
+            {
+                Some(recipe) => format!(
+                    "{block} -> {} @ {} CF",
+                    recipe.result_id().unwrap_or("nothing"),
+                    recipe.energy
+                ),
+                None => format!("{block} -> nothing"),
+            },
+            LensEffect::Mining => match stack
+                .and_then(|stack| find_mining_recipes(host, &stack).into_iter().next())
+                .and_then(|recipe| recipe.result_id().map(str::to_owned))
+            {
+                // One of the matching recipes is named for the readout; which one the beam draws
+                // is random, so the line says "mining" rather than promising a particular ore.
+                Some(id) => format!("{block} -> mining {id} @ {MINING_LENS_ENERGY} CF"),
+                None => format!("{block} -> nothing"),
+            },
         };
     }
     "nothing".to_owned()
@@ -1640,7 +1826,8 @@ pub(crate) fn status_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
     }
     if kind == RECONSTRUCTOR {
         let facing = facing_at(&*host, level, pos);
-        let sight = reconstructor_sight(&*host, level, pos, facing);
+        let lens = lens_slot_item(&*host, level, pos);
+        let sight = reconstructor_sight(&*host, level, pos, facing, lens.as_deref());
         return reconstructor_line(
             pos,
             &read_reconstructor(&saved),
@@ -1938,8 +2125,14 @@ impl BlockEntityPart for ReconstructorPart {
         if event.entity.items.len() != RECONSTRUCTOR_SLOTS {
             event.entity.items.resize(RECONSTRUCTOR_SLOTS, None);
         }
+        let lens = event
+            .entity
+            .items
+            .first()
+            .and_then(Option::as_ref)
+            .map(|stack| stack.item().id(&*host));
         let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
-        let changed = tick_reconstructor(host, level, pos, &mut saved);
+        let changed = tick_reconstructor(host, level, pos, &mut saved, lens.as_deref());
         if let Tag::Compound(nbt) = saved {
             event.entity.nbt = nbt;
         }

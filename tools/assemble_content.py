@@ -31,6 +31,12 @@ copies the two machines' files and applies only the patches listed in
    `lens` crafting recipe and the four lens conversions, plus the `c:glass_blocks` tag the
    crafting recipe keys on. The four behaviour lenses' own crafting recipes are not carried: they
    name crystals and enchanted books this package does not ship.
+8. (slice 10, 0.2.11) the miner lens's own item and the jar's **top-level** `recipe/mininglens/`
+   files (the 20 vanilla-ore recipes; the carry's subfolders name other mods' ores and are not
+   carried), the two `actuallyadditions:*_ore_replaceables` tags and the NeoForge
+   `c:ore_bearing_ground/netherrack` convention tag. This is the data `LensMining.invoke` reads
+   through `ActuallyAdditionsAPI.MINING_LENS_RECIPES`; the miner item's own craft is not carried
+   (it needs crystals this package does not ship), so the in-game rig gives it.
 
 Run from the campaign root; it writes `assets/` and `data/` at the package root (the SDK
 layout — there is no `content/` folder any more, and the root `horizon-mod.toml` is the only
@@ -92,6 +98,15 @@ LASER_RECIPES = (
 LENS_RECIPES = ("lens",)
 LENS_LASER_RECIPES = ("lens", "lens_of_color", "lens_of_detonation", "lens_of_certain_death")
 LENS_ITEMS = LENS_LASER_RECIPES
+# Slice 10 (0.2.11): the miner lens item and the 20 top-level `mining_lens` recipes. The jar's
+# 1.3.26 data also has subfolders for other mods' ores (elementalcraft, mekanism, …); those are
+# not this package's data and would name ids it cannot resolve, so only the top level is carried.
+MINER_LENS = "lens_of_the_miner"
+MINING_LENS_RECIPE_DIR = "mininglens"
+# The two jar tags every top-level mining-lens recipe keys on, plus the NeoForge convention tag
+# the three nether recipes key on (26.3 ships no `c:` namespace, so it is declared here).
+ORE_REPLACEABLE_TAGS = ("stone_ore_replaceables", "deepslate_ore_replaceables")
+NETHERRACK_GROUND_TAG = ("minecraft:netherrack",)
 # NeoForge 1.21.x's `c:glass_blocks`: glass, tinted glass and the 16 stained glass blocks; panes
 # belong to `c:glass_panes`. 26.3 ships no `c:` namespace, so the tag the lens recipe keys on is
 # declared here. Every member exists in the 26.3 item registry (check_recipe_keys.py verifies it).
@@ -580,6 +595,41 @@ def main() -> None:
         json.dumps({"values": list(GLASS_BLOCK_TAG)}, indent=2) + "\n",
     )
 
+    # (0.2.11) the miner lens: its item, the jar's top-level `mining_lens` recipe table and the
+    # tags those recipes key on. `LensMining.invoke` takes the sighted block's item, finds the
+    # recipes whose ingredient matches (`ActuallyAdditionsAPI.MINING_LENS_RECIPES`), draws a
+    # weighted random one and places its result block over the source for 60,000 CF. The miner's
+    # own crafting recipe names empowered crystals this package does not carry, so the item is
+    # given by the in-game rig and that is stated plainly in the evidence.
+    copy(
+        CARRY / f"assets/actuallyadditions/items/{MINER_LENS}.json",
+        assets / f"items/{MINER_LENS}.json",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/models/item/{MINER_LENS}.json",
+        assets / f"models/item/{MINER_LENS}.json",
+    )
+    copy(
+        CARRY / f"assets/actuallyadditions/textures/item/{MINER_LENS}.png",
+        assets / f"textures/item/{MINER_LENS}.png",
+    )
+    write(
+        data / f"horizon/item/{MINER_LENS}.json",
+        json.dumps({"template": "minecraft:stick", "max_stack_size": 1}, indent=2) + "\n",
+    )
+    source_dir = CARRY / "data/actuallyadditions/recipe" / MINING_LENS_RECIPE_DIR
+    for recipe in sorted(source_dir.glob("*.json")):
+        copy(recipe, data / f"recipe/{MINING_LENS_RECIPE_DIR}/{recipe.name}")
+    for tag in ORE_REPLACEABLE_TAGS:
+        copy(
+            CARRY / f"data/actuallyadditions/tags/item/{tag}.json",
+            OUT / f"data/actuallyadditions/tags/item/{tag}.json",
+        )
+    write(
+        OUT / "data/c/tags/item/ore_bearing_ground/netherrack.json",
+        json.dumps({"values": list(NETHERRACK_GROUND_TAG)}, indent=2) + "\n",
+    )
+
     # Upstream's creative tab is code; one tab for the slice, with the two
     # crafting-chain pieces the machine recipes are made of.
     write(
@@ -588,7 +638,7 @@ def main() -> None:
             {
                 "title": "itemGroup.actuallyadditions.machines",
                 "icon": "actuallyadditions:coal_generator",
-                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)] + [f"actuallyadditions:{GEM}"] + [f"actuallyadditions:{i}" for i in ITEMS] + [f"actuallyadditions:{RECONSTRUCTOR}", f"actuallyadditions:{CRYSTAL}"] + [f"actuallyadditions:{i}" for i in LENS_ITEMS],
+                "items": [f"actuallyadditions:{b}" for b in BLOCKS + (CASING, ORE)] + [f"actuallyadditions:{GEM}"] + [f"actuallyadditions:{i}" for i in ITEMS] + [f"actuallyadditions:{RECONSTRUCTOR}", f"actuallyadditions:{CRYSTAL}"] + [f"actuallyadditions:{i}" for i in LENS_ITEMS] + [f"actuallyadditions:{MINER_LENS}"],
             },
             indent=2,
         )
