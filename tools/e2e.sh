@@ -97,6 +97,11 @@
 #    (health 0, still briefly listed by `ctl entities` at this pin, so the parsed assertion is on
 #    health > 0) and emptying the buffer, while the readout names `killer @ 2500 CF` at a solid
 #    sight; the default-lens differential keeps its cow and spends only the 1,000 CF gate;
+#  - (0.2.15) the three machines drive a vanilla comparator: a coal-charged generator (32,000 FE)
+#    and a 30,000 FE crusher read floor(FE / 60000 * 15), and a 40,000 CF reconstructor reads
+#    clamp(CF / 20000, 0, 15), from the
+#    comparator's own `power` block-state property (it has no block entity at this pin); plain
+#    stone and a fresh uncharged machine both read 0;
 #  - with CONTROL_GAME set, an unmodded game on the same scratch home knows neither id
 #    (`setblock` answers `Unknown block type`), so the ids are the package's.
 #
@@ -115,11 +120,12 @@
 # false; SELFTEST=killer flips the kill assertion ("the cow survives and only the gate is spent"),
 # which the 2,500 CF fake-player hit makes false; SELFTEST=disenchant flips the move assertion
 # ("both items stay unchanged and only the gate is spent"), which the 250,000 CF enchantment move
-# makes false. NEGATIVE=1 flips the crafting phase's recipe-book assertion ("the Coal Generator's
+# makes false; SELFTEST=comparator flips the charged generator's signal assertion ("it reads 0"),
+# which the wired hook makes false. NEGATIVE=1 flips the crafting phase's recipe-book assertion ("the Coal Generator's
 # recipe is not unlocked"), which is the pre-0.2.4 state, so it must fail on this package.
 #
 #   GAME=<launcher-built horizon-client> [CTL=<horizon-ctl>] [CONTROL_GAME=<unmodded game>] \
-#       [SELFTEST=1|drops|ore|laser|item|pulse|lens|lens-effect|detonation|killer|disenchant] [NEGATIVE=1] tools/e2e.sh
+#       [SELFTEST=1|drops|ore|laser|item|pulse|lens|lens-effect|detonation|killer|disenchant|comparator] [NEGATIVE=1] tools/e2e.sh
 set -euo pipefail
 export LC_ALL=C
 
@@ -249,6 +255,11 @@ pulse_of() { sed -nE 's/.*pulse (on|off),.*/\1/p' <<<"$1"; }
 facing_of() { sed -nE 's/.*facing ([a-z]+),.*/\1/p' <<<"$1"; }
 sight_of() { sed -nE 's/.*sight (.*), t=[0-9]+.*/\1/p' <<<"$1"; }
 block_state_of() { ctl block "$1" "$2" "$3" | jq -r '.state // .name // .block // empty'; }
+# The parsed power of a redstone wire (0..15) placed in front of a comparator — at this pin a
+# comparator's own state only carries `powered`, and it has no block entity for `data get block`.
+comparator_power() { # comparator_power X Y Z  (the WIRE in front of the comparator)
+    block_state_of "$1" "$2" "$3" | sed -nE 's/.*power=([0-9]+).*/\1/p'
+}
 # expect_block X Y Z ID: the state at that position is ID (its properties, if any, follow).
 expect_block() { # expect_block X Y Z ID
     local got
@@ -277,7 +288,10 @@ charge() { # charge X Y Z AMOUNT
     for _ in $(seq 1 20); do
         ctl wait 4 >/dev/null
         out=$(ctl messages 20)
-        line=$(jq -r '.chat[]' <<<"$out" | grep -E "charged .* at $1,$2,$3:" | head -1)
+        # A brand-new position has no earlier charge reply, so grep may find nothing on the first
+        # poll; under `pipefail` that would kill the leg before the reply arrives (the `info`
+        # helper carries the same `|| true`).
+        line=$(jq -r '.chat[]' <<<"$out" | grep -E "charged .* at $1,$2,$3:" | head -1 || true)
         if [ -n "$line" ] && [ "$line" != "$before" ]; then
             echo "$line"
             return
@@ -2250,9 +2264,86 @@ echo "  the plain lens's sword: $DIFF_SWORD"
 grep -q sharpness <<<"$DIFF_SWORD" || fail "the plain lens stripped the sword's enchantment: $DIFF_SWORD"
 [ "$(energy_of "$DIFF_DIS_LINE")" = 250000 ] || fail "the plain lens spent more than the 1,000 CF gate: $DIFF_DIS_LINE"
 
+echo "== the three machines drive a vanilla comparator (0.2.15) =="
+# The artefact's own formulas: the generator and the crusher report floor(FE / 60000 * 15), the
+# Atomic Reconstructor clamp(CF / 20000, 0, 15). At this pin a comparator's own block state only
+# carries `powered`, so the readable signal is the `power` of a redstone wire placed in front of it
+# (never `data get block`: a comparator has no block entity here).
+# A fresh row at z=-5 is clear of every earlier phase; the fuel feed stands at z=-7.5, which is
+# still over the arena floor (z >= -8) and can look at the machine.
+COMP_Z=-5
+GEN_C=0; CRUSH_C=4; RECON_C=8; STONE_C=12; FRESH_C=16
+GEN_W=2; CRUSH_W=6; RECON_W=10; STONE_W=14; FRESH_W=18
+ctl command "fill -2 100 -5 18 100 -5 minecraft:air" >/dev/null
+ctl wait 6
+ctl command "setblock $GEN_C 100 $COMP_Z actuallyadditions:coal_generator" >/dev/null
+ctl command "setblock $CRUSH_C 100 $COMP_Z actuallyadditions:crusher" >/dev/null
+ctl command "setblock $RECON_C 100 $COMP_Z actuallyadditions:atomic_reconstructor[facing=north]" >/dev/null
+# Redstone freezes the reconstructor's 100-tick cycle, so its buffer cannot drift between the
+# charge and the comparator read (the 0.2.8 freeze assertion proved this surface).
+ctl command "setblock $RECON_C 100 $((COMP_Z + 1)) minecraft:redstone_block" >/dev/null
+ctl command "setblock $STONE_C 100 $COMP_Z minecraft:stone" >/dev/null
+ctl command "setblock $FRESH_C 100 $COMP_Z actuallyadditions:coal_generator" >/dev/null
+for c in "$((GEN_C + 1))" "$((CRUSH_C + 1))" "$((RECON_C + 1))" "$((STONE_C + 1))" "$((FRESH_C + 1))"; do
+    # This engine reads the block in the comparator's `facing` direction, so face it back at the
+    # machine (west); the wire one cell further east reads the comparator's output.
+    ctl command "setblock $c 100 $COMP_Z minecraft:comparator[facing=west]" >/dev/null
+done
+# One redstone wire per comparator, in the direction it faces. Its `power` is the comparator's
+# analogue output; the five cells are four apart, so no wire picks up another's signal.
+for w in "$GEN_W" "$CRUSH_W" "$RECON_W" "$STONE_W" "$FRESH_W"; do
+    ctl command "setblock $w 100 $COMP_Z minecraft:redstone_wire" >/dev/null
+done
+ctl wait 20
+# The generator's buffer takes no inserts, so it is charged with one coal: 1,600 ticks × 20 FE/t
+# gives a stable 32,000 FE once the burn ends (floor(32000/60000*15) = 8). The crusher and the
+# reconstructor accept inserts: 30,000 FE gives 7 and 40,000 CF gives clamp(40000/20000,0,15) = 2.
+# All three differ from the other formula and from the unwired vanilla 0.
+# The crusher's buffer inserts at most 100 FE per call, so a single `/charge` tops out at 6,400;
+# repeat it until 30,000 (the reconstructor's 5,000-a-call buffer reaches 40,000 in one go).
+for _ in $(seq 1 8); do
+    CRUSH_LINE=$(info "$CRUSH_C" 100 "$COMP_Z")
+    [ "$(energy_of "$CRUSH_LINE")" -ge 30000 ] && break
+    charge "$CRUSH_C" 100 "$COMP_Z" 30000 >/dev/null
+done
+charge "$RECON_C" 100 "$COMP_Z" 40000 >/dev/null
+feed "$GEN_C" 100 "$COMP_Z" minecraft:coal
+for _ in $(seq 1 25); do
+    ctl wait 100 >/dev/null
+    GEN_LINE=$(info "$GEN_C" 100 "$COMP_Z")
+    [ "$(energy_of "$GEN_LINE")" -ge 32000 ] && break
+done
+ctl wait 40 >/dev/null
+GEN_LINE=$(info "$GEN_C" 100 "$COMP_Z")
+CRUSH_LINE=$(info "$CRUSH_C" 100 "$COMP_Z")
+RECON_LINE=$(info "$RECON_C" 100 "$COMP_Z")
+GEN_SIGNAL=$(comparator_power "$GEN_W" 100 "$COMP_Z")
+CRUSH_SIGNAL=$(comparator_power "$CRUSH_W" 100 "$COMP_Z")
+RECON_SIGNAL=$(comparator_power "$RECON_W" 100 "$COMP_Z")
+STONE_SIGNAL=$(comparator_power "$STONE_W" 100 "$COMP_Z")
+FRESH_SIGNAL=$(comparator_power "$FRESH_W" 100 "$COMP_Z")
+echo "  generator: $GEN_LINE"
+echo "  crusher: $CRUSH_LINE"
+echo "  reconstructor: $RECON_LINE"
+echo "  wire states: gen=$(block_state_of "$GEN_W" 100 "$COMP_Z") crush=$(block_state_of "$CRUSH_W" 100 "$COMP_Z") recon=$(block_state_of "$RECON_W" 100 "$COMP_Z") stone=$(block_state_of "$STONE_W" 100 "$COMP_Z") fresh=$(block_state_of "$FRESH_W" 100 "$COMP_Z")"
+echo "  parsed signals: generator=$GEN_SIGNAL crusher=$CRUSH_SIGNAL reconstructor=$RECON_SIGNAL stone=$STONE_SIGNAL uncharged=$FRESH_SIGNAL"
+if [ "$SELFTEST" = comparator ]; then
+    [ "$GEN_SIGNAL" = 0 ] || fail "SELFTEST comparator: the generator's comparator read $GEN_SIGNAL (the real assertion); the flipped assertion 'it reads 0' fails, so the real one can fail"
+    fail "SELFTEST comparator: the flipped assertion passed (no signal), so it proves nothing"
+fi
+[ "$(energy_of "$GEN_LINE")" = 32000 ] || fail "one coal did not leave 32,000 FE in the generator: $GEN_LINE"
+[ "$(energy_of "$CRUSH_LINE")" = 30000 ] || fail "the charged crusher did not hold 30,000 FE: $CRUSH_LINE"
+[ "$(energy_of "$RECON_LINE")" = 40000 ] || fail "the charged reconstructor did not hold 40,000 CF: $RECON_LINE"
+[ "$GEN_SIGNAL" = 8 ] || fail "a 32,000 FE generator should read 8 (floor(32000/60000*15)), got '$GEN_SIGNAL'"
+[ "$CRUSH_SIGNAL" = 7 ] || fail "a 30,000 FE crusher should read 7 (floor(30000/60000*15)), got '$CRUSH_SIGNAL'"
+[ "$RECON_SIGNAL" = 2 ] || fail "a 40,000 CF reconstructor should read 2 (clamp(40000/20000,0,15)), got '$RECON_SIGNAL'"
+[ "$STONE_SIGNAL" = 0 ] || fail "a comparator reading plain stone should read 0, got '$STONE_SIGNAL'"
+[ "$FRESH_SIGNAL" = 0 ] || fail "a comparator reading an uncharged generator should read 0, got '$FRESH_SIGNAL'"
+echo "  the three machines' buffers drive their comparators; stone and an uncharged machine read zero"
+
 ctl command "tp @s 0.5 100 3.5" >/dev/null
 ctl wait 6
 
 control
 
-echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), the reconstructor's redstone mode started off and a stick left it there while a click holding a redstone torch switched it to pulse mode without placing the torch, pulse mode neither ran its cycle nor fired without a signal, a redstone block beside the machine fired exactly one 1,040 CF shot on each of two rising edges (two crystals, a 2,080 CF buffer emptied, the cycle untouched) while the same machine without the toggle stayed frozen on the same signal and spent nothing, and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed; the lens (eight glass and a Black Quartz, all nine consumed) crafted and right-clicked into the reconstructor's empty slot (info read lens actuallyadditions:lens x1), a second lens was refused by the occupied slot and a stick was refused by the slot, and a dropped lens in the beam became lens_of_color for the 1,000 CF gate plus the 5,000 CF ring conversion (40 CF left) while a dropped stick stayed and spent only its gate, and the harness-given miner lens in the slot made a 61,000 CF shot swap the sighted stone for one of the nine mining-lens ores (the block read back with ctl block) while a fresh default-lens machine kept its stone and spent only its gate, and the harness-given detonator lens in the slot made a 251,000 CF shot set off the artefact's sourceless radius-10 fiery blast — spending 250,000 CF and lighting fire in the arena while **keeping** the sighted stone, because upstream's ExplosionInteraction.NONE keeps blocks at this pin — whereas a fresh default-lens machine kept its 250,000 CF, started no fire and kept its stone, and the harness-given killer lens made a 3,500 CF shot hurt a NoAI cow in the sighted air cell for 20 damage from a fake player's player_attack at 2,500 CF (the cow's health 0, the buffer 0, the readout naming killer @ 2500 CF at a solid sight) while the default-lens differential kept its cow and spent only the 1,000 CF gate, the harness-given disenchanting lens made a 251,000 CF shot move sharpness from a dropped diamond sword onto a dropped book in the sighted cell (the book's stored_enchantments named sharpness, the sword lost it, the buffer 0, the readout naming disenchanting @ 250000 CF) while the default-lens differential left both items untouched and spent only the 1,000 CF gate"
+echo "PASS: the adjacent crusher took it and crushed coal ore into 3 coal, an unfuelled generator made nothing, a crusher without FE crushed nothing, stone was refused by both, a broken generator kept its FE and burn on its item and came back with them when placed again (a fresh machine did not), a broken loaded crusher kept its FE and progress without carrying its stacks and came back with an empty container (an empty one came back empty), the machines survived a relaunch, the Coal Generator's own recipe unlocked and crafted one machine from six cobblestone (all c:cobblestones tag members), two iron casings and a coal with every ingredient consumed (iron ingots in the casing cells and stone in the cobblestone cells stayed empty), the Iron Casing's own recipe crafted one from #c:ingots/iron, #c:rods/wooden and one Black Quartz with every item consumed (gold ingots and coal in the tag cells stayed empty), the Black Quartz Ore placed and dropped Black Quartz from its own loot table (stone the same way dropped cobblestone, silk touch dropped the ore block instead), the ore smelted and blasted into one Black Quartz each and crushed into two, the ore's generation is asserted as blocked(configured-feature-not-registered) at this pin (the placed feature is merged and skipped as an unknown feature reference, so no ore generates; the day it does, this phase fails), the Atomic Reconstructor faced away from the player who placed it, a generator beside it charged its 300,000 CF buffer, one 1,040 CF shot turned the redstone wire in its beam into a restonia crystal drop and left the block gone and the buffer empty (a stone block at the same distance stayed and the shot still spent its 1,000 CF; 1,039 CF converted nothing; the beam reached a block ten away and not one eleven away; two convertible blocks in one plane were both converted by 1,120 CF and only one by 1,040; a redstone block froze its cycle; a broken one kept its buffer on its item), the beam's item half converted a dropped redstone into one Restonia Crystal with its count conserved and its output marked aa_cnv (the same item two blocks across the beam stayed redstone while the shot spent only its 1,000 CF gate; a stack of three converted exactly one and left two, unmarked; a west-facing beam converted its item too), the two item-only laser recipes converted at their own energy (rotten flesh into leather at 20,000 CF and quartz into a prismarine shard at 30,000 CF, each leaving an empty buffer), the reconstructor's redstone mode started off and a stick left it there while a click holding a redstone torch switched it to pulse mode without placing the torch, pulse mode neither ran its cycle nor fired without a signal, a redstone block beside the machine fired exactly one 1,040 CF shot on each of two rising edges (two crystals, a 2,080 CF buffer emptied, the cycle untouched) while the same machine without the toggle stayed frozen on the same signal and spent nothing, and the Crusher's recipe — uncraftable until this slice — now crafts from two restonia crystals, proving the chain closed; the lens (eight glass and a Black Quartz, all nine consumed) crafted and right-clicked into the reconstructor's empty slot (info read lens actuallyadditions:lens x1), a second lens was refused by the occupied slot and a stick was refused by the slot, and a dropped lens in the beam became lens_of_color for the 1,000 CF gate plus the 5,000 CF ring conversion (40 CF left) while a dropped stick stayed and spent only its gate, and the harness-given miner lens in the slot made a 61,000 CF shot swap the sighted stone for one of the nine mining-lens ores (the block read back with ctl block) while a fresh default-lens machine kept its stone and spent only its gate, and the harness-given detonator lens in the slot made a 251,000 CF shot set off the artefact's sourceless radius-10 fiery blast — spending 250,000 CF and lighting fire in the arena while **keeping** the sighted stone, because upstream's ExplosionInteraction.NONE keeps blocks at this pin — whereas a fresh default-lens machine kept its 250,000 CF, started no fire and kept its stone, and the harness-given killer lens made a 3,500 CF shot hurt a NoAI cow in the sighted air cell for 20 damage from a fake player's player_attack at 2,500 CF (the cow's health 0, the buffer 0, the readout naming killer @ 2500 CF at a solid sight) while the default-lens differential kept its cow and spent only the 1,000 CF gate, the harness-given disenchanting lens made a 251,000 CF shot move sharpness from a dropped diamond sword onto a dropped book in the sighted cell (the book's stored_enchantments named sharpness, the sword lost it, the buffer 0, the readout naming disenchanting @ 250000 CF) while the default-lens differential left both items untouched and spent only the 1,000 CF gate, and the three machines drove vanilla comparators whose signals were read as the power of redstone wires in front of them (a coal-charged 32,000 FE generator read 8, a 30,000 FE crusher read 7, a 40,000 CF reconstructor read 2 with a frozen cycle) while plain stone and a fresh uncharged generator read 0"

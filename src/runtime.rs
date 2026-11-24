@@ -450,6 +450,42 @@ pub fn comparator_strength(energy: i32, capacity: i32) -> i32 {
     strength.clamp(0, 15)
 }
 
+/// Which of the artefact's two comparator formulas a machine uses: the Coal Generator and the
+/// Crusher scale their 60,000 buffer into fifteen steps, the Atomic Reconstructor steps every
+/// 20,000 CF. A block id that is not one of the three answers `None`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComparatorMachine {
+    Generator,
+    Crusher,
+    Reconstructor,
+}
+
+impl ComparatorMachine {
+    /// Resolve a carried machine block id (`actuallyadditions:coal_generator` and friends).
+    #[must_use]
+    pub fn from_block(id: &str) -> Option<Self> {
+        match id {
+            "actuallyadditions:coal_generator" => Some(Self::Generator),
+            "actuallyadditions:crusher" => Some(Self::Crusher),
+            "actuallyadditions:atomic_reconstructor" => Some(Self::Reconstructor),
+            _ => None,
+        }
+    }
+}
+
+/// The analogue signal a comparator reads from one of the three machines, from the artefact's own
+/// formula (`BlockCoalGenerator`/`BlockCrusher`: `floor(energy / 60000 * 15)`;
+/// `BlockAtomicReconstructor`: `clamp(energy / 20000, 0, 15)`).
+#[must_use]
+pub fn analog_strength(machine: ComparatorMachine, energy: i32) -> i32 {
+    match machine {
+        ComparatorMachine::Generator | ComparatorMachine::Crusher => {
+            comparator_strength(energy, GENERATOR_CAPACITY)
+        }
+        ComparatorMachine::Reconstructor => reconstructor_comparator(energy),
+    }
+}
+
 /// The Coal Generator's saved state (`energy`, `burn`, `burn_max`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Generator {
@@ -2545,6 +2581,42 @@ mod tests {
             15,
             "a stale over-capacity read still answers 15"
         );
+    }
+
+    #[test]
+    fn each_machine_reports_its_own_comparator_formula() {
+        // The two 60,000 machines scale into fifteen steps; at 30,000 FE that is 7, while the
+        // reconstructor's 20,000-CF step gives 1. A single shared formula would fail here.
+        assert_eq!(
+            ComparatorMachine::from_block("actuallyadditions:coal_generator"),
+            Some(ComparatorMachine::Generator)
+        );
+        assert_eq!(
+            ComparatorMachine::from_block("actuallyadditions:crusher"),
+            Some(ComparatorMachine::Crusher)
+        );
+        assert_eq!(
+            ComparatorMachine::from_block("actuallyadditions:atomic_reconstructor"),
+            Some(ComparatorMachine::Reconstructor)
+        );
+        assert_eq!(ComparatorMachine::from_block("minecraft:stone"), None);
+        assert_eq!(analog_strength(ComparatorMachine::Generator, 0), 0);
+        assert_eq!(analog_strength(ComparatorMachine::Generator, 30_000), 7);
+        assert_eq!(analog_strength(ComparatorMachine::Generator, 60_000), 15);
+        assert_eq!(analog_strength(ComparatorMachine::Crusher, 12_000), 3);
+        assert_eq!(analog_strength(ComparatorMachine::Crusher, 30_000), 7);
+        assert_eq!(analog_strength(ComparatorMachine::Reconstructor, 19_999), 0);
+        assert_eq!(analog_strength(ComparatorMachine::Reconstructor, 30_000), 1);
+        assert_eq!(
+            analog_strength(ComparatorMachine::Reconstructor, 300_000),
+            15
+        );
+        assert_eq!(
+            analog_strength(ComparatorMachine::Generator, 90_000),
+            15,
+            "a stale over-capacity read still answers 15"
+        );
+        assert_eq!(analog_strength(ComparatorMachine::Reconstructor, -5), 0);
     }
 
     #[test]

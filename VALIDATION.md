@@ -1,5 +1,42 @@
 # Validation
 
+**0.2.15 (2026-11-24, pin `0a875da`)** — slice 14: the three machines' **comparator output**. Cargo
+steps were forwarded to the remote runner (`REMOTE_HOST` defaults to `deepseek@192.168.1.115`,
+hostname `AdLf-PC`; no `BUILD_LOCAL=1` for the cargo steps); the launcher build ran in a local slot
+because the far box lacks `libxkbcommon-x11.so.0`. The artefact's formulas are
+`floor(energy/60000*15)` for the generator and crusher and `clamp(energy/20000,0,15)` for the
+reconstructor. **Surface gate passed first:** `has_analog_output`/`analog_output` and their
+`BlockPart` methods are stamped; the hook's `&dyn LevelHost` cannot resolve a block entity from a
+position, so the machine's tick mirrors the strength into a per-world table and the Part reads it.
+
+| Check | Command | Result |
+|---|---|---|
+| rules (red) | `cargo test --offline`, `analog_strength` at `todo!()` | **74 passed / 1 failed**, `not yet implemented: the per-machine comparator formula` — `evidence/actuallyadditions/sdk-test-red-comparator.log` |
+| tests (final tree) | `cargo test --offline` | **75 passed / 0 failed** (56 runtime incl. the new dispatcher, 19 glue), `Compiling actuallyadditions v0.2.15` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (the `type_complexity` finding fixed by a named `AnalogCache` alias, the `collapsible_if` by a let-chain) — `sdk-clippy.log` |
+| format | `cargo fmt --check` | exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` | `7 recipe(s), 36 craftable, 0 blocked, 0 failure(s)`, exit 0 — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **189,592 B** both, `cmp` identical, sha256 `752e6132578ddf75c472c6de5570d0cc1b05f0d681dc0ed93c15e5f9c58429aa`, **210 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `cargo horizon-mod check actuallyadditions.hmod` | `actuallyadditions 0.2.15 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 189,592 bytes, EXIT 0 — `sdk-check.log` |
+| fits (pin) | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits (different build) | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `python3 ports/tools/verify-sdk-package.py actuallyadditions` | **1/1**, `package matches the tree`, R9 rows green |
+| launcher build | fresh `native-0a875da-261b1a8eb68d` | `Compiling actuallyadditions (1 of 1)` — `launcher-build-0.2.15.log` |
+| in-game | `tools/e2e.sh` (`--offscreen`, the final package's launcher build) | `PASS` + `EXIT:0` — `e2e-launcher.log` (first line names the delivered sha) |
+| counterfactual | `SELFTEST=comparator` | `FAIL: SELFTEST comparator: the generator's comparator read 8 (the real assertion); …` + `EXIT:1` — `e2e-launcher-selftest-comparator.log` |
+| counterfactual | `SELFTEST={disenchant,killer,detonation,lens-effect,lens,1,drops,ore,laser,item,pulse}` | each `FAIL:` + `EXIT:1` — the eleven earlier selftest logs |
+| counterfactual | `NEGATIVE=1` | `FAIL: NEGATIVE: the Coal Generator's recipe unlocked (0.2.4's behaviour)` + `EXIT:1` — `e2e-launcher-negative.log` |
+| control | `CONTROL=1` (the same Nightly, no package) | `FAIL: expected actuallyadditions:coal_generator at 0,100,0, got 'minecraft:air'` + `EXIT:1` — `e2e-launcher-control.log` |
+| log audit | `check-e2e-logs.py actuallyadditions-e2e --strict` | `logs=15 ok=15 missing-exit=0 bad-exit=0`, exit 0 |
+
+The comparator phase's own lines (`e2e-launcher.log`): the generator is charged with one coal to a
+stable 32,000 FE, the crusher takes eight `/charge` calls to reach 30,000 FE, and the reconstructor
+takes one 40,000 CF charge with a redstone block freezing its cycle. The five comparators face
+**west** at their machines; a redstone wire one cell east of each reports its `power` — 8, 7, 2 for
+the three machines and 0 for plain stone and a fresh uncharged generator. `SELFTEST=comparator`
+flips the generator's assertion to "reads 0", which the wired package makes false. The 14 earlier
+legs are unchanged and re-proved in the same run.
+
 **0.2.14 (2026-11-24, pin `0a875da`)** — slice 13: the **disenchanting lens's own beam effect**.
 Cargo steps were forwarded to the remote runner (`REMOTE_HOST` defaults to
 `deepseek@192.168.1.115`, hostname `AdLf-PC`; no `BUILD_LOCAL=1` for the cargo steps); the launcher

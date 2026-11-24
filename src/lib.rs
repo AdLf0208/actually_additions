@@ -25,7 +25,8 @@
 //! | `right-click-block` (21) | `BlockPart::use_item_on` + `use_without_item` on both Parts |
 //! | `register-commands` (8) | [`Mod::register_commands`] |
 //! | `perform-command` (8) | [`Mod::run_mod_command`] (typed `CommandInvocation`) |
-//! | `world-lifecycle` (v1) | [`Mod::world_lifecycle`] (drop the recipe cache and the push queue) |
+//! | `world-lifecycle` (v1) | [`Mod::world_lifecycle`] (drop the recipe cache, the push queue and the comparator mirror) |
+//! | comparator output (hook 64) | `BlockPart::has_analog_output` + `BlockPart::analog_output` on the three machines, mirroring the artefact's formulas from their saved buffers |
 use mod_api::{
     self, BlockDropsEvent, Flow, Hooks, HostSide, LevelHost, LevelTickPostEvent,
     RegisterCommandsEvent, Registrar, RegistrationContext, RunModCommandEvent, ServerHost,
@@ -73,6 +74,7 @@ impl Hooks for Mod {
     fn world_lifecycle(&self, _host: &mut dyn ServerHost, _event: &mut WorldLifecycleEvent<'_>) {
         support::reset_recipes();
         support::clear_push_queue();
+        support::clear_analog_cache();
     }
 
     /// A block broke: a machine's item keeps its saved state (FE, burn, progress), which vanilla

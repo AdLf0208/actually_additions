@@ -7,8 +7,9 @@
 //! *declares* (one insert-only fuel slot, three crusher slots, an output-only and an input-only
 //! buffer), that the state written to the saved compound reads back, and the exact lines
 //! `/actuallyadditions info` prints.
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use mod_api::{
     self, BiomeModifier, BiomeModifierOperation, BlockClick, BlockDropsEvent, BlockEntityEvent,
@@ -16,21 +17,22 @@ use mod_api::{
     BlockState, BlockUpdateFlags, Command, CommandArgumentValue, ComponentId, Compound, ENERGY,
     ExplosionInteraction, ExplosionSettings, Flow, Host, HostTransaction, Identifier, Ingredient,
     InteractionResult, ItemKey, ItemPart, ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef,
-    LevelSide, ModContainer, ModEnergyBuffer, OnBlockPlacedByEvent, RandomSource, Registrar,
-    RegistrationContext, RunModCommandEvent, ServerHost, StateForPlacementEvent, Tag, Text,
-    move_energy,
+    LevelSide, ModContainer, ModEnergyBuffer, NeighbourUpdate, OnBlockPlacedByEvent, RandomSource,
+    Registrar, RegistrationContext, RunModCommandEvent, ServerHost, StateForPlacementEvent, Tag,
+    Text, move_energy,
 };
 
 use crate::runtime::{
-    CONVERTED_MARKER, CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, Conversion, CrushResult,
-    Crusher, CrushingRecipe, DETONATION_BLAST_RADIUS, DETONATION_LENS_ENERGY,
-    DISENCHANTING_LENS_ENERGY, GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT, Generator, KILLER_DAMAGE,
-    KILLER_LENS_ENERGY, LaserRecipe, LensEffect, MINING_LENS_ENERGY, MiningLensRecipe,
-    RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_MAX_INSERT, RECONSTRUCTOR_TICKS, Reconstructor, Signal,
-    Step, bonus_for, can_crush, clamp_energy, comparator_strength, conversion_plane, convert,
-    detonation_stop, disenchant_split, disenchanting_stop, facing_for_placement, is_fuel, is_lens,
-    item_scan_box, items_possible, killer_stop, lens_slot_accepts, may_convert, pick_weighted,
-    reconstructor_comparator, restored_crusher, restored_generator, restored_reconstructor,
+    CONVERTED_MARKER, CRUSHER_CAPACITY, CRUSHER_MAX_INSERT, CRUSHER_TICKS, ComparatorMachine,
+    Conversion, CrushResult, Crusher, CrushingRecipe, DETONATION_BLAST_RADIUS,
+    DETONATION_LENS_ENERGY, DISENCHANTING_LENS_ENERGY, GENERATOR_CAPACITY, GENERATOR_MAX_EXTRACT,
+    Generator, KILLER_DAMAGE, KILLER_LENS_ENERGY, LaserRecipe, LensEffect, MINING_LENS_ENERGY,
+    MiningLensRecipe, RECONSTRUCTOR_CAPACITY, RECONSTRUCTOR_MAX_INSERT, RECONSTRUCTOR_TICKS,
+    Reconstructor, Signal, Step, analog_strength, bonus_for, can_crush, clamp_energy,
+    comparator_strength, conversion_plane, convert, detonation_stop, disenchant_split,
+    disenchanting_stop, facing_for_placement, is_fuel, is_lens, item_scan_box, items_possible,
+    killer_stop, lens_slot_accepts, may_convert, pick_weighted, reconstructor_comparator,
+    restored_crusher, restored_generator, restored_reconstructor,
 };
 
 /// The generator block; its block entity type carries the same path.
@@ -607,6 +609,69 @@ pub(crate) fn in_place_level(host: &dyn ServerHost) -> Option<LevelRef> {
         .list_levels()
         .into_iter()
         .find(|level| level.in_place(host))
+}
+
+// ---------------------------------------------------------------------------
+// Comparator output (0.2.15)
+// ---------------------------------------------------------------------------
+
+/// The last analogue strength each machine reported, keyed by level id and position.
+///
+/// The pin's `analog_output` hook gets a `&dyn LevelHost`, which can read a `BlockEntityRef` but
+/// cannot resolve one from a position (only a `Host` can, through `block_entity(level, pos)`).
+/// The machine's own tick therefore mirrors the artefact's strength here, and the Part reads the
+/// mirror. A block-entity tick runs every game tick, so the value is at most one tick old; the
+/// mirror is published with an `OutputSignal` neighbour update when it changes, which is what
+/// makes a vanilla comparator beside the machine re-read it.
+type AnalogCache = HashMap<(String, [i32; 3]), i32>;
+
+static ANALOG: LazyLock<Mutex<AnalogCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Drop the mirror when a world opens or closes: the positions belong to that world.
+pub(crate) fn clear_analog_cache() {
+    ANALOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+/// The strength a comparator reads at `pos` in `dimension`, or 0 for a machine that has not
+/// ticked here yet.
+fn analog_at(dimension: &str, pos: [i32; 3]) -> i32 {
+    ANALOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&(dimension.to_owned(), pos))
+        .copied()
+        .unwrap_or(0)
+        .clamp(0, 15)
+}
+
+/// Recompute a machine's strength from its saved buffer and publish it. A change wakes the
+/// comparators beside it; an equal value does nothing, so an idle machine costs no updates.
+fn publish_analog(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    machine: ComparatorMachine,
+    saved: &Tag,
+) {
+    let energy = match machine {
+        ComparatorMachine::Generator => read_generator(saved).energy,
+        ComparatorMachine::Crusher => read_crusher(saved).energy,
+        ComparatorMachine::Reconstructor => read_reconstructor(saved).energy,
+    };
+    let strength = analog_strength(machine, energy);
+    let dimension = level.dimension().id(&*host).unwrap_or_default();
+    let changed = {
+        let mut map = ANALOG
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.insert((dimension, pos), strength) != Some(strength)
+    };
+    if changed && let Some(state) = level.block_state(&*host, pos) {
+        let _ = level.update_neighbors(host, pos, state, NeighbourUpdate::OutputSignal);
+    }
 }
 
 /// The generator: load fuel when upstream would, burn one tick and make 20 FE, then queue itself
@@ -2282,6 +2347,31 @@ impl BlockPart for GeneratorPart {
     ) -> Option<InteractionResult> {
         machine_click(host, event.click, None)
     }
+
+    /// `BlockCoalGenerator.hasAnalogOutputSignal`: a comparator reads this machine's buffer.
+    fn has_analog_output(&self, level: &dyn LevelHost, event: &mut mod_api::HasAnalogOutputEvent) {
+        if level
+            .state_block(event.state)
+            .and_then(ComparatorMachine::from_block)
+            .is_some()
+        {
+            event.output = true;
+        }
+    }
+
+    /// `BlockCoalGenerator.getAnalogOutputSignal`: `floor(energy / 60000 * 15)`.
+    fn analog_output(&self, level: &dyn LevelHost, event: &mut mod_api::AnalogOutputEvent) {
+        if level
+            .state_block(event.state)
+            .and_then(ComparatorMachine::from_block)
+            .is_some()
+        {
+            event.output = analog_at(
+                event.dimension.key().id(),
+                [event.pos.x, event.pos.y, event.pos.z],
+            );
+        }
+    }
 }
 
 #[mod_api::horizon_part]
@@ -2310,6 +2400,9 @@ impl BlockEntityPart for GeneratorPart {
         let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
         let items = &mut event.entity.items;
         let changed = tick_generator(host, level, pos, &mut saved, items);
+        if let Some(level) = level {
+            publish_analog(host, level, pos, ComparatorMachine::Generator, &saved);
+        }
         if let Tag::Compound(nbt) = saved {
             event.entity.nbt = nbt;
         }
@@ -2339,6 +2432,31 @@ impl BlockPart for CrusherPart {
     ) -> Option<InteractionResult> {
         machine_click(host, event.click, None)
     }
+
+    /// `BlockCrusher.hasAnalogOutputSignal`: a comparator reads this machine's buffer.
+    fn has_analog_output(&self, level: &dyn LevelHost, event: &mut mod_api::HasAnalogOutputEvent) {
+        if level
+            .state_block(event.state)
+            .and_then(ComparatorMachine::from_block)
+            .is_some()
+        {
+            event.output = true;
+        }
+    }
+
+    /// `BlockCrusher.getAnalogOutputSignal`: `floor(energy / 60000 * 15)`.
+    fn analog_output(&self, level: &dyn LevelHost, event: &mut mod_api::AnalogOutputEvent) {
+        if level
+            .state_block(event.state)
+            .and_then(ComparatorMachine::from_block)
+            .is_some()
+        {
+            event.output = analog_at(
+                event.dimension.key().id(),
+                [event.pos.x, event.pos.y, event.pos.z],
+            );
+        }
+    }
 }
 
 #[mod_api::horizon_part]
@@ -2364,6 +2482,9 @@ impl BlockEntityPart for CrusherPart {
         let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
         let items = &mut event.entity.items;
         let changed = tick_crusher(host, level, &mut saved, items);
+        if let Some(level) = level {
+            publish_analog(host, level, event.pos, ComparatorMachine::Crusher, &saved);
+        }
         if let Tag::Compound(nbt) = saved {
             event.entity.nbt = nbt;
         }
@@ -2412,6 +2533,31 @@ impl BlockPart for ReconstructorPart {
     ) -> Option<InteractionResult> {
         reconstructor_click(host, event.click, None)
     }
+
+    /// `BlockAtomicReconstructor.hasAnalogOutputSignal`: a comparator reads this machine's buffer.
+    fn has_analog_output(&self, level: &dyn LevelHost, event: &mut mod_api::HasAnalogOutputEvent) {
+        if level
+            .state_block(event.state)
+            .and_then(ComparatorMachine::from_block)
+            .is_some()
+        {
+            event.output = true;
+        }
+    }
+
+    /// `BlockAtomicReconstructor.getAnalogOutputSignal`: `clamp(energy / 20000, 0, 15)`.
+    fn analog_output(&self, level: &dyn LevelHost, event: &mut mod_api::AnalogOutputEvent) {
+        if level
+            .state_block(event.state)
+            .and_then(ComparatorMachine::from_block)
+            .is_some()
+        {
+            event.output = analog_at(
+                event.dimension.key().id(),
+                [event.pos.x, event.pos.y, event.pos.z],
+            );
+        }
+    }
 }
 
 #[mod_api::horizon_part]
@@ -2443,6 +2589,9 @@ impl BlockEntityPart for ReconstructorPart {
             .map(|stack| stack.item().id(&*host));
         let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
         let changed = tick_reconstructor(host, level, pos, &mut saved, lens.as_deref());
+        if let Some(level) = level {
+            publish_analog(host, level, pos, ComparatorMachine::Reconstructor, &saved);
+        }
         if let Tag::Compound(nbt) = saved {
             event.entity.nbt = nbt;
         }

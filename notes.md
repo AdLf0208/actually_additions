@@ -3256,3 +3256,186 @@ to a vanilla comparator.
   `floor(FE / 60000 * 15)`; a fresh uncharged machine reads 0, and a comparator reading a plain
   stone block beside it reads 0 (differential). `SELFTEST=comparator` flips the expected value to
   `EXIT:1`.
+
+## Slice 14 (0.2.15, 2026-11-24) — the three machines drive vanilla comparators
+
+**Family:** the comparator output of the Coal Generator, the Crusher and the Atomic Reconstructor.
+The three strengths were already computed and printed by `/actuallyadditions info`, but no
+`has_analog_output`/`analog_output` hook was declared, so a vanilla comparator read nothing.
+
+- **Gap line** (slice 12/13 coverage tables): *"the GUI, ore generation, comparator, beam visual —
+  unchanged: printed-not-wired, no packet"*; slice 1 deviation 7: *"no comparator output —
+  `comparator_strength` is computed (and printed), but no `has_analog_output` hook is declared"*.
+- **Why it fits `machines`:** two typed `BlockPart` methods on each existing machine's block, with
+  the artefact's formulas already in `runtime.rs` — no new block, block entity, renderer or recipe.
+
+### The artefact's formulas (read, not invented)
+
+| Block | Signal | Source (`cd9d9c63`) |
+|---|---|---|
+| Coal Generator | `floor(energy / 60000 * 15)`, clamped 0..15 | `BlockCoalGenerator.getAnalogOutputSignal` (recorded in slice 1's behaviour table) |
+| Crusher | the same 60,000-capacity formula | `BlockCrusher.getAnalogOutputSignal` (slice 1) |
+| Atomic Reconstructor | `clamp(energy / 20000, 0, 15)` | `BlockAtomicReconstructor.getAnalogOutputSignal` (slice 5's behaviour table) |
+
+The pin confirms both hooks are stamped: `hook:has_analog_output` / `hook:analog_output`
+(`surface.json:519, 19169`) and `BlockPart::{has_analog_output,analog_output}`
+(`surface.json:52601, 52993`). `HasAnalogOutputEvent` carries `state` + `output: bool` (answer from
+the state alone); `AnalogOutputEvent` carries `dimension`, `pos`, `state`, `face` and
+`output: i32` (vanilla's answer, replace it). A changed answer without a state change is published
+with `LevelRef::update_neighbors(host, pos, state, NeighbourUpdate::OutputSignal)`.
+
+**The pin constraint that shapes the glue:** `analog_output` is handed `&dyn LevelHost`, which can
+read a `BlockEntityRef` but cannot make one from a position — `BlockEntityRef` has private fields and
+only `Host::block_entity(level, pos)` constructs it. The hook therefore cannot read the machine's
+FE out of its block entity directly. The machine's own tick (which owns the saved compound) mirrors
+the artefact's strength into a per-world, per-position table; the Part reads that mirror. A block
+entity ticks every game tick, so the value is at most one tick old, and an `OutputSignal` neighbour
+update on each change is what makes a vanilla comparator beside the machine re-read it. This is a
+platform seam, not an upstream deviation (the formula and the signal are the artefact's).
+
+### TDD — the red, verbatim
+
+`ComparatorMachine` + `analog_strength` were added with the dispatcher at `todo!()` first;
+`evidence/actuallyadditions/sdk-test-red-comparator.log` (`cargo test --offline`, exit 101):
+
+```text
+---- runtime::tests::each_machine_reports_its_own_comparator_formula stdout ----
+thread '…' panicked at src/runtime.rs:481:5:
+not yet implemented: the per-machine comparator formula
+test result: FAILED. 74 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+exit=101
+```
+
+The test pins all three formulas at values that distinguish them: a 30,000-FE generator/crusher
+reads 7, the reconstructor reads 1 at 30,000 CF; 60,000 FE reads 15, 40,000 CF reads 2;
+over-capacity and negative buffers clamp. Green: **75 passed**, 0 failed.
+
+### Glue
+
+`support::publish_analog` reads the saved buffer through the existing `read_generator` /
+`read_crusher` / `read_reconstructor`, calls `runtime::analog_strength(ComparatorMachine, energy)`
+and stores it in `ANALOG: LazyLock<Mutex<HashMap<(level, pos), i32>>>`, keyed by
+`level.dimension().id(host)` (the same string the event's `dimension.key().id()` gives). Each of the
+three Parts declares `has_analog_output` (true only for its own block id, resolved from `state`)
+and `analog_output` (the mirrored strength, clamped to 0..15). Each machine's `block_entity_tick`
+publishes after computing its saved compound; `world_lifecycle` clears the table. The dependency-free
+`Json` reader and R9 are untouched; no local type/variant collides with the SDK surface, so both
+`fits` runs were green on the first attempt.
+
+### Ladder (cargo steps forwarded to `AdLf-PC`, no `BUILD_LOCAL=1`; launcher build local)
+
+| Step | Result |
+|---|---|
+| rules (red) | 74 passed / 1 failed, `todo!()` — `sdk-test-red-comparator.log` |
+| tests (final tree, after the build) | **75 passed**, 0 failed, `Compiling actuallyadditions v0.2.15` — `sdk-test.log` |
+| lints | `cargo clippy --all-targets --offline -- -D warnings`, exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check`, exit 0 — `sdk-fmt.log` |
+| content rule | `python3 tools/check_recipe_keys.py` — `7 recipe(s), 36 craftable, 0 blocked, 0 failure(s)` — `check-recipe-keys.log` |
+| package ×2 | `rm -f Cargo.lock && cargo horizon-mod build`, twice — **189,592 B** both, `cmp` identical, sha256 `752e6132578ddf75c472c6de5570d0cc1b05f0d681dc0ed93c15e5f9c58429aa`, **210 entries, no `Cargo.lock`** — `sdk-build.log`, `sdk-build-second.log` |
+| check | `actuallyadditions 0.2.15 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 189,592 bytes, EXIT 0 — `sdk-check.log` |
+| fits, the pin | `0a875da  made for`, EXIT 0 — `sdk-fits.log` |
+| fits, a different build | `0b14f8a  fits`, EXIT 0 — `sdk-fits-other.log` |
+| gate | `verify-sdk-package.py actuallyadditions` → **1/1**, `package matches the tree`, R9 rows green |
+| launcher build | fresh `native-0a875da-261b1a8eb68d`, `Compiling actuallyadditions (1 of 1)` — `launcher-build-0.2.15.log` |
+
+### In-game transcript (`evidence/actuallyadditions-e2e/e2e-launcher.log`, 0.2.15)
+
+```text
+== the three machines drive a vanilla comparator (0.2.15) ==
+  generator: Coal Generator at 0,100,-5: 32000/60000 FE (comparator 8, burning 0/1600 ticks, …)
+  crusher: Crusher at 4,100,-5: 30000/60000 FE (comparator 7, …)
+  reconstructor: Atomic Reconstructor at 8,100,-5: 40000/300000 CF (comparator 2, facing north, …)
+  wire states: gen=minecraft:redstone_wire[…,power=8,…] crush=…power=7 recon=…power=2 stone=…power=0 fresh=…power=0
+  parsed signals: generator=8 crusher=7 reconstructor=2 stone=0 uncharged=0
+  the three machines' buffers drive their comparators; stone and an uncharged machine read zero
+PASS: … + EXIT:0
+```
+
+The generator's buffer takes no inserts, so it is charged with one coal (1,600 × 20 FE = a stable
+32,000 FE); the crusher's 100-FE-per-call buffer needs eight `/charge` calls to reach 30,000; the
+reconstructor's 5,000-a-call buffer reaches 40,000 in one, with a redstone block freezing its cycle
+so the buffer cannot drift. A comparator's own block state only carries `powered` at this pin, so
+the asserted readout is the `power` of a redstone wire placed in front of it.
+
+Every assertion can fail and was made to: `SELFTEST=comparator` flips the generator's signal to
+"reads 0", which the wired 32,000 FE machine makes false —
+`FAIL: SELFTEST comparator: the generator's comparator read 8 (the real assertion); …` + `EXIT:1`
+(`e2e-launcher-selftest-comparator.log`). The stone and fresh-machine differentials are inside the
+same run; the 14 earlier legs re-proved green under `--strict`.
+
+### Coverage (slice 14)
+
+| Family | State |
+|---|---|
+| generator comparator `floor(energy/60000*15)` | **tested** — 32,000 FE → wire power 8 (unit-tested at 0/30,000/60,000/90,000 too) |
+| crusher comparator (same formula) | **tested** — 30,000 FE → wire power 7 |
+| reconstructor comparator `clamp(energy/20000,0,15)` | **tested** — 40,000 CF → wire power 2, cycle frozen |
+| `has_analog_output` claims only our three blocks | **tested in game** — the five comparators read our buffers, plain stone reads 0; a non-machine state is left to vanilla |
+| the buffered mirror and its neighbour update | **tested** — the wire's power follows each buffer crossing a step, without a block-state change |
+| differentials | **tested** — a fresh uncharged generator and a plain stone block both read 0 |
+| the formula choice | **unit-tested** — a 30,000 generator/crusher reads 7 while a 30,000 reconstructor reads 1 |
+
+### Deviations and gaps this slice adds
+
+1. **The strength is a tick-maintained mirror, not a direct NBT read.** The pin's analog hook cannot
+   resolve a block entity from a position, so the machine's tick publishes the value; a charge made
+   outside a tick is visible on the next one. The formula, the clamp and the signal are the
+   artefact's; only the route differs.
+2. **The generator is charged with fuel, the crusher with eight `/charge` calls.** Neither is a
+   gameplay change: the generator's buffer takes no inserts upstream either, and the crusher's
+   insert is 100 FE per call.
+3. The pin's comparator state has `powered` but no `power` property; the in-game readout is the
+   redstone wire's `power`, not `data get block` (a comparator has no block entity).
+4. The rest of the earlier gap list stands: the GUI (`blocked(no-single-player-mod-screen)`), the
+   Double Crusher and the other machines, energy relays, the Empowerer, the booklet, `lit` and
+   particles, and the ore's generation (`blocked(configured-feature-not-registered)`).
+
+### Harness facts measured while getting there
+
+1. `ctl look-at-block` fails when the player stands at `z = row - 2.5` if that lands off the arena
+   floor (`z < -8`); the comparator row is at `z=-5` so the fuel feed stands at `-7.5`, still over
+   stone.
+2. This engine reads the block in a comparator's `facing` direction, so a comparator one cell east
+   of the machine must face **west**; facing east made it read the wire instead and every signal
+   was 0.
+3. A `minecraft:redstone_block` placed to freeze the reconstructor must not be adjacent to a signal
+   wire — one cell away made the crusher's wire read 15 regardless of the comparator.
+4. A backtick-quoted id in the final `echo "PASS: …"` is executed by bash; the PASS line spells
+   "power" plainly (the 0.2.14 `stored_enchantments` trap in another costume).
+5. Three counterfactual legs (`pulse`, twice `negative`) exited **3** mid-run with no `FAIL:` line
+   while other ports' games shared the box: the game process vanished (`cannot connect … is the
+   game running with --control?`, or a bare `EXIT:3` at launch). Each passed on a plain re-run in a
+   free slot; a fail-capable leg whose log lacks its own `FAIL:`/`EXIT:1` is not evidence, so such
+   a run must be repeated rather than accepted.
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+**Changelog (0.2.15):**
+
+> **0.2.15 — the three machines drive vanilla comparators.** Each machine's block now declares
+> `has_analog_output` and `analog_output`, reporting the artefact's own formula from a tick-fresh
+> mirror of its saved buffer (`floor(FE/60000*15)` for the generator and the crusher,
+> `clamp(CF/20000,0,15)` for the reconstructor) and waking the comparators beside it on each step.
+> The pin's analog hook cannot resolve a block entity from a position, so the strength is published
+> from the machine's own tick rather than read from NBT in the hook. In game a 32,000 FE generator
+> reads 8, a 30,000 FE crusher 7, a 40,000 CF reconstructor 2, while stone and an uncharged machine
+> read 0; `SELFTEST=comparator` inverts it to `EXIT:1`. 75 unit tests, 210 entries, 189,592 B,
+> sha256 `752e6132…58429`.
+
+## Next slice (0.2.16)
+
+**Family:** the **Double Crusher** — the next `machines`-tier machine in the jar that is not yet
+carried. Read its block, block entity, container and recipe from the artefact before promising any
+numbers; record the families you find rather than inferring them from the name.
+
+- **Gap line** (`Deviations and gaps (slice 1)`, item 12): *"No Double Crusher, auto-split,
+  redstone gating, config, JEI/booklet, worldgen, or any of the other machines listed in
+  `FINDINGS.md`."*
+- **Why it fits `machines`:** a second crusher-like block entity with a container and an energy
+  buffer, proved through the same `/actuallyadditions info` + `crushing` recipe path this port
+  already ships — no GUI, renderer or new hook kind.
+- **In-game assertion that can fail:** place the Double Crusher, feed its two inputs, tick to
+  completion, assert two outputs and the FE spend through the parsed `info` line; differential: a
+  single crusher with one input produces one output. `SELFTEST=double` inverts it to `EXIT:1`.
+- **Out of scope:** the GUI (`blocked(no-single-player-mod-screen)`), the ore's generation
+  (`blocked(configured-feature-not-registered)`), relays, the Empowerer and the booklet.
